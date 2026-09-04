@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from dataclasses import dataclass, field, asdict
 
@@ -172,9 +173,14 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
         ))
 
     launches.sort(key=lambda l: -l.block)
+    total_found = len(launches)
     launches = launches[:limit]
     if not deep:
         return launches
+
+    print(f"found {total_found} launches; deep-analyzing the {len(launches)} "
+          f"most recent (use --fast to skip, --limit to widen)...",
+          file=sys.stderr)
 
     graduated_tokens = {
         _addr(log["topics"][1])
@@ -185,7 +191,7 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
     txs = rpc.batch([("eth_getTransactionByHash", [l.tx_hash]) for l in launches])
     symbols = rpc.batch([("eth_call", [{"to": l.token, "data": SEL_SYMBOL}, "latest"])
                          for l in launches])
-    for launch, tx, sym in zip(launches, txs, symbols):
+    for i, (launch, tx, sym) in enumerate(zip(launches, txs, symbols), 1):
         if isinstance(sym, str):
             launch.symbol = _decode_string(sym)
         launch.graduated = launch.token in graduated_tokens
@@ -193,13 +199,16 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
             launch.declared_exemptions, launch.exemptions_known = \
                 exemptions_from_calldata(tx.get("input", ""))
             snipe_window_activity(rpc, launch)
+        if i % 10 == 0 or i == len(launches):
+            print(f"  analyzed {i}/{len(launches)}", file=sys.stderr)
     return launches
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Watch Pons launches on Robinhood Chain")
-    ap.add_argument("--hours", type=float, default=6, help="lookback window")
-    ap.add_argument("--limit", type=int, default=200)
+    ap.add_argument("--hours", type=float, default=1, help="lookback window")
+    ap.add_argument("--limit", type=int, default=50,
+                    help="max launches to deep-analyze, newest first")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--fast", action="store_true",
                     help="skip per-launch calldata/curve analysis")
@@ -207,7 +216,10 @@ def main() -> None:
 
     rpc = EvmRpc()
     to_block = rpc.latest_block()
+    print("locating start block...", file=sys.stderr)
     from_block = block_near_time(rpc, int(time.time() - args.hours * 3600))
+    print(f"scanning blocks {from_block}-{to_block} for Pons launches...",
+          file=sys.stderr)
     launches = recent_launches(rpc, from_block, to_block,
                                deep=not args.fast, limit=args.limit)
 
