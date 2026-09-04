@@ -23,7 +23,7 @@ def _fmt_amount(raw: int, decimals: int) -> str:
 
 
 def run(token: str, pair: str | None, bundle_only: bool, as_json: bool,
-        log: bool = True) -> int:
+        log: bool = True, creation_block: int | None = None) -> int:
     rpc = EvmRpc()
     if config.EVM_CHAIN_ID:
         actual = rpc.chain_id()
@@ -46,7 +46,7 @@ def run(token: str, pair: str | None, bundle_only: bool, as_json: bool,
         return 2
 
     token_info = inspect_token(rpc, token)
-    launch = analyze_launch(rpc, token, pair)
+    launch = analyze_launch(rpc, token, pair, creation_block=creation_block)
     clusters = analyze_clusters(rpc, token, launch)
     holders = None
     if not bundle_only:
@@ -124,9 +124,13 @@ def main() -> None:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--no-log", action="store_true",
                     help="skip writing this run to the outcome ledger")
+    ap.add_argument("--creation-block", type=int,
+                    help="launch block override — required when --pair is a "
+                         "singleton (e.g. the Uniswap v4 PoolManager for "
+                         "Long/graduated-Pons tokens)")
     args = ap.parse_args()
     sys.exit(run(args.token, args.pair, args.bundle_only, args.json,
-                 log=not args.no_log))
+                 log=not args.no_log, creation_block=args.creation_block))
 
 
 if __name__ == "__main__":

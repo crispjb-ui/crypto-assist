@@ -15,8 +15,10 @@ Primary target: **Robinhood Chain** (EVM, Arbitrum Orbit stack, mainnet since Ju
 | DexScreener slug | `robinhood` (dexscreener.com/robinhood) |
 | Pons V1 factory | `0xA5aAb3F0c6EeadF30Ef1D3Eb997108E976351feB` |
 | Pons V2 factory | `0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e` |
+| Long factory (empirical) | `0x22e99278308b393ea1260859b181ad7e78f5eeed` |
+| Uniswap v4 PoolManager | `0x8366a39cc670b4001a1121b8f6a443a643e40951` |
 
-Launchpads: **Pons** (ponsfamily.com — dominant, >100k launches, ~1% graduate; official contracts at github.com/ponsdotdev/ponsfamily) and **Long** (long.xyz — pairs launches against tokenized stocks like NVDA/TSLA; no public contracts repo found yet, so `pons.py`-style support for Long needs its factory address derived from a known launch tx first). DEXes with deployments on the chain include Uniswap (v3/v4), SushiSwap, Arcus, Rialto, Lighter.
+Launchpads: **Pons** (ponsfamily.com — dominant, >100k launches, ~1% graduate; official contracts at github.com/ponsdotdev/ponsfamily; watcher: `pons.py`) and **Long** (long.xyz — pairs launches against tokenized stocks like NVDA/TSLA in Uniswap v4 pools; contracts unpublished, factory and events derived empirically from the flagship AI/NVDA launch tx via `derive_factory.py`; watcher: `long.py`). DEXes with deployments on the chain include Uniswap (v3/v4), SushiSwap, Arcus, Rialto, Lighter. `derive_factory.py` bootstraps a watcher for any new launchpad from a single launched-token address.
 
 ### Pons and the declared-bundle signal
 
