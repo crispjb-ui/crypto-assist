@@ -22,15 +22,17 @@ def _fmt_amount(raw: int, decimals: int) -> str:
     return f"{raw / 10 ** decimals:,.2f}"
 
 
-def run(token: str, pair: str | None, bundle_only: bool, as_json: bool,
-        log: bool = True, creation_block: int | None = None) -> int:
-    rpc = EvmRpc()
-    if config.EVM_CHAIN_ID:
-        actual = rpc.chain_id()
-        if str(actual) != str(config.EVM_CHAIN_ID):
-            print(f"WARNING: RPC serves chain id {actual}, .env expects "
-                  f"{config.EVM_CHAIN_ID}", file=sys.stderr)
+class NoPairError(RuntimeError):
+    pass
 
+
+def collect(token: str, pair: str | None = None, bundle_only: bool = False,
+            creation_block: int | None = None, log: bool = True,
+            rpc: EvmRpc | None = None) -> dict:
+    """Run the full diligence pipeline and return the payload as plain data.
+    Raises NoPairError when no pool can be located. Logs to the outcome
+    ledger unless log=False."""
+    rpc = rpc or EvmRpc()
     market = None
     if not pair and config.DEXSCREENER_CHAIN_ID:
         try:
@@ -39,11 +41,12 @@ def run(token: str, pair: str | None, bundle_only: bool, as_json: bool,
                 pair = best.get("pairAddress")
                 market = best
         except Exception as exc:
-            print(f"note: DexScreener lookup failed ({exc}); pass --pair", file=sys.stderr)
+            print(f"note: DexScreener lookup failed ({exc}); pass --pair",
+                  file=sys.stderr)
     if not pair:
-        print("No pair found. Pass --pair 0xPAIR (DexScreener does not index this "
-              "chain, or the token has no pool).", file=sys.stderr)
-        return 2
+        raise NoPairError(
+            "No pair found — DexScreener does not index this token yet. "
+            "Provide the pool/curve address explicitly.")
 
     token_info = inspect_token(rpc, token)
     launch = analyze_launch(rpc, token, pair, creation_block=creation_block)
@@ -57,34 +60,69 @@ def run(token: str, pair: str | None, bundle_only: bool, as_json: bool,
         holders = holder_stats(rpc, token, token_deploy, exclude={pair})
 
     verdict = evaluate(token_info, launch, clusters, holders)
-
+    payload = {
+        "token": asdict(token_info),
+        "pair": pair,
+        "market": market,
+        "launch": asdict(launch),
+        "clusters": asdict(clusters),
+        "holders": asdict(holders) if holders else None,
+        "verdict": asdict(verdict),
+        "verdict_line": verdict_line(verdict),
+    }
     if log:
         try:
             store.log_run(
-                token=token,
-                pair=pair,
+                token=token, pair=pair,
                 kind="bundle-only" if bundle_only else "report",
                 score=verdict.score,
                 flags=[asdict(f) for f in verdict.flags],
-                notes=verdict.notes,
-                market=market,
-                data={"token": asdict(token_info), "launch": asdict(launch),
-                      "clusters": asdict(clusters),
-                      "holders": asdict(holders) if holders else None},
+                notes=verdict.notes, market=market,
+                data={k: payload[k] for k in ("token", "launch", "clusters",
+                                              "holders")},
             )
         except Exception as exc:
             print(f"note: run ledger write failed ({exc})", file=sys.stderr)
+    return payload
+
+
+def run(token: str, pair: str | None, bundle_only: bool, as_json: bool,
+        log: bool = True, creation_block: int | None = None) -> int:
+    rpc = EvmRpc()
+    if config.EVM_CHAIN_ID:
+        actual = rpc.chain_id()
+        if str(actual) != str(config.EVM_CHAIN_ID):
+            print(f"WARNING: RPC serves chain id {actual}, .env expects "
+                  f"{config.EVM_CHAIN_ID}", file=sys.stderr)
+
+    try:
+        payload = collect(token, pair, bundle_only, creation_block, log, rpc)
+    except NoPairError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     if as_json:
-        print(json.dumps({
-            "token": asdict(token_info),
-            "market": market,
-            "launch": asdict(launch),
-            "clusters": asdict(clusters),
-            "holders": asdict(holders) if holders else None,
-            "verdict": asdict(verdict),
-        }, indent=2, default=str))
+        print(json.dumps(payload, indent=2, default=str))
         return 0
+
+    # re-hydrate the pieces the text renderer uses
+    from .clusters import ClusterReport
+    from .early_buyers import EarlyBuyer, LaunchWindow
+    from .erc20 import TokenInfo
+    from .holders import HolderStats
+    from .score import Flag, Verdict
+    token_info = TokenInfo(**payload["token"])
+    launch = LaunchWindow(**{
+        **payload["launch"],
+        "buyers": [EarlyBuyer(**b) for b in payload["launch"]["buyers"]]})
+    clusters = ClusterReport(**{**payload["clusters"], "profiles": []})
+    holders = HolderStats(**payload["holders"]) if payload["holders"] else None
+    if holders:
+        holders.top_holders = [tuple(t) for t in holders.top_holders]
+    verdict = Verdict(score=payload["verdict"]["score"],
+                      flags=[Flag(**f) for f in payload["verdict"]["flags"]],
+                      notes=payload["verdict"]["notes"])
+    market, pair = payload["market"], payload["pair"]
 
     d = token_info.decimals
     print(f"\n=== {token_info.name} ({token_info.symbol}) — {token} ===")
