@@ -21,13 +21,65 @@ import time
 import traceback
 
 from . import long as long_mod
-from . import outcomes, pons, report
+from . import outcomes, pons, report, store
 from .pons import block_near_time
 from .rpc import EvmRpc
 
 
 def _stage(name: str):
     print(f"\n=== {name} — {time.strftime('%Y-%m-%d %H:%M:%S')} ===", flush=True)
+
+
+def print_shortlist(pons_launches, long_launches, since_ts: int) -> None:
+    """Positive selection from measured evidence only. A listing here means the
+    rig-checks passed AND organic-demand markers are present — it is a
+    watchlist for fundamental research, never a buy signal.
+
+    Ranked by organic demand (taxed outside buys on Pons, distinct early
+    buyers on Long) among launches with no insider snipe activity and a low
+    diligence score where one was recorded today.
+    """
+    scores: dict[str, int] = {}
+    with store.connect() as conn:
+        for token, score in conn.execute(
+                "SELECT token, score FROM runs WHERE ts >= ?", (since_ts,)):
+            scores[token] = min(score, scores.get(token, 99))
+
+    rows = []
+    for l in pons_launches:
+        if l.exempt_buys or l.declared_exemptions:
+            continue                      # insider cluster present
+        if not l.taxed_buys:
+            continue                      # no measured outside demand
+        score = scores.get(l.token)
+        if score is not None and score > 2:
+            continue                      # diligence found real flags
+        rows.append(("pons", l.symbol, l.token, l.taxed_buys,
+                     l.graduated, score))
+    for l in long_launches:
+        if not l.early_buys or l.offloaded_top >= 3:
+            continue
+        score = scores.get(l.token)
+        if score is not None and score > 2:
+            continue
+        rows.append((f"long/{l.paired_symbol}", l.symbol, l.token,
+                     l.early_buyers, False, score))
+
+    rows.sort(key=lambda r: (-int(r[4]), -r[3]))
+    if not rows:
+        print("No launches met the candidate bar today (that is the normal "
+              "outcome — most days produce nothing worth your attention).")
+        return
+    print("Rig-checks passed + organic demand measured. NOT buy signals — "
+          "this is the research queue:")
+    for venue, symbol, token, demand, graduated, score in rows[:10]:
+        tag = "GRADUATED  " if graduated else ""
+        scored = f"score {score}" if score is not None else "no deep check yet"
+        print(f"  {venue:12} {symbol:10.10} {token}  organic-demand {demand:>4}  "
+              f"{tag}{scored}")
+    print("Next for each: verify contract source yourself, re-check holder "
+          "drift in 24-72h (re-run report), and judge team/product off-chain "
+          "— nothing on this list has been vetted for any of that.")
 
 
 def main() -> None:
@@ -38,6 +90,7 @@ def main() -> None:
                     help="max auto-diligence reports per run")
     args = ap.parse_args()
     failures = 0
+    run_started = int(time.time())
 
     _stage("outcomes update")
     try:
@@ -104,6 +157,13 @@ def main() -> None:
         except Exception:
             traceback.print_exc()
             failures += 1
+
+    _stage("candidate shortlist")
+    try:
+        print_shortlist(pons_launches, long_launches, run_started)
+    except Exception:
+        traceback.print_exc()
+        failures += 1
 
     _stage("flag calibration stats")
     try:
