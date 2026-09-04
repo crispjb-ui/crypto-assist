@@ -28,7 +28,11 @@ DEXSCREENER_CHAIN_ID = os.environ.get("DEXSCREENER_CHAIN_ID", "")
 NATIVE_SYMBOL = os.environ.get("NATIVE_SYMBOL", "ETH")
 
 MAX_LOG_BLOCK_RANGE = int(os.environ.get("MAX_LOG_BLOCK_RANGE", "5000"))
-EARLY_WINDOW_BLOCKS = int(os.environ.get("EARLY_WINDOW_BLOCKS", "20"))
+# "Early buyer" = bought within this many SECONDS of pair creation; converted
+# to blocks at runtime from the measured block rate (fast chains make any
+# fixed block count meaningless).
+EARLY_WINDOW_SECONDS = float(os.environ.get("EARLY_WINDOW_SECONDS", "60"))
+EARLY_WINDOW_BLOCKS = int(os.environ.get("EARLY_WINDOW_BLOCKS", "0"))  # 0 = derive
 MAX_EARLY_BUYERS = int(os.environ.get("MAX_EARLY_BUYERS", "40"))
 
 

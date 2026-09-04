@@ -101,7 +101,7 @@ def parse_launch_receipt(receipt: dict, tx_from: str) -> LongLaunch | None:
     )
 
 
-def early_activity(rpc: EvmRpc, launch: LongLaunch, window_blocks: int = 40,
+def early_activity(rpc: EvmRpc, launch: LongLaunch, window_blocks: int = 2_000,
                    offload_retention_pct: float = 10.0) -> None:
     """Buys = token Transfers out of the PoolManager right after launch."""
     logs = rpc.get_logs(
@@ -135,7 +135,8 @@ def early_activity(rpc: EvmRpc, launch: LongLaunch, window_blocks: int = 40,
 
 
 def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
-                    deep: bool = True, limit: int = 50) -> list[LongLaunch]:
+                    deep: bool = True, limit: int = 50,
+                    window_blocks: int = 2_000) -> list[LongLaunch]:
     marker_logs = rpc.get_logs(from_block, to_block, address=LONG_FACTORY,
                                topics=[TOPIC_LONG_LAUNCH])
     tx_hashes = sorted({log["transactionHash"] for log in marker_logs})
@@ -167,7 +168,7 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
 
     if deep:
         for i, launch in enumerate(launches, 1):
-            early_activity(rpc, launch)
+            early_activity(rpc, launch, window_blocks=window_blocks)
             if i % 10 == 0 or i == len(launches):
                 print(f"  analyzed {i}/{len(launches)}", file=sys.stderr)
     return launches
@@ -179,6 +180,8 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=50)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--fast", action="store_true", help="skip early-buy analysis")
+    ap.add_argument("--window-mins", type=float, default=5,
+                    help="early-buy window after launch, in minutes")
     args = ap.parse_args()
 
     rpc = EvmRpc()
@@ -187,8 +190,11 @@ def main() -> None:
     from_block = block_near_time(rpc, int(time.time() - args.hours * 3600))
     print(f"scanning blocks {from_block}-{to_block} for Long launches...",
           file=sys.stderr)
+    # Robinhood Chain blocks run ~100-150ms; convert minutes to measured blocks.
+    window = rpc.blocks_for_seconds(args.window_mins * 60, floor=200, cap=50_000)
     launches = recent_launches(rpc, from_block, to_block,
-                               deep=not args.fast, limit=args.limit)
+                               deep=not args.fast, limit=args.limit,
+                               window_blocks=window)
 
     if args.json:
         print(json.dumps([asdict(l) for l in launches], indent=2))

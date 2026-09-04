@@ -126,6 +126,20 @@ class EvmRpc:
         blk = self.call("eth_getBlockByNumber", [hex(block), False])
         return int(blk["timestamp"], 16) if blk else 0
 
+    def estimate_block_rate(self, sample_blocks: int = 100_000) -> float:
+        """Measured blocks per second. Robinhood Chain runs ~100-150ms blocks,
+        so never assume a rate — derive time windows from a live sample."""
+        hi = self.latest_block()
+        lo = max(hi - sample_blocks, 0)
+        hi_ts, lo_ts = self.get_block_time(hi), self.get_block_time(lo)
+        if hi_ts <= lo_ts:
+            return 4.0  # degenerate sample; conservative fallback
+        return (hi - lo) / (hi_ts - lo_ts)
+
+    def blocks_for_seconds(self, seconds: float,
+                           floor: int = 50, cap: int = 20_000) -> int:
+        return min(max(int(self.estimate_block_rate() * seconds), floor), cap)
+
     def find_deploy_block(self, address: str, lo: int = 0, hi: int | None = None) -> int:
         """First block where the address has code (binary search; needs historical state)."""
         hi = hi if hi is not None else self.latest_block()

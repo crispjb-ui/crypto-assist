@@ -152,7 +152,7 @@ def block_near_time(rpc: EvmRpc, target_ts: int) -> int:
 
 
 def snipe_window_activity(rpc: EvmRpc, launch: PonsLaunch,
-                          window_blocks: int = 80) -> None:
+                          window_blocks: int = 300) -> None:
     """Classify CurveBuy events right after launch: tax==0 → declared/bundle
     wallet buying at the untaxed price; tax>0 → outsider paying the snipe tax."""
     logs = rpc.get_logs(launch.block, launch.block + window_blocks,
@@ -173,7 +173,8 @@ def snipe_window_activity(rpc: EvmRpc, launch: PonsLaunch,
 
 
 def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
-                    deep: bool = True, limit: int = 200) -> list[PonsLaunch]:
+                    deep: bool = True, limit: int = 200,
+                    snipe_window_blocks: int = 300) -> list[PonsLaunch]:
     launches: list[PonsLaunch] = []
 
     for log in rpc.get_logs(from_block, to_block, address=V2_FACTORY,
@@ -232,7 +233,7 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
                 key = ((tx.get("to") or "?").lower(), calldata[:10].lower())
                 entry = unknown_entrypoints.setdefault(key, [0, launch.tx_hash])
                 entry[0] += 1
-            snipe_window_activity(rpc, launch)
+            snipe_window_activity(rpc, launch, window_blocks=snipe_window_blocks)
         if i % 10 == 0 or i == len(launches):
             print(f"  analyzed {i}/{len(launches)}", file=sys.stderr)
 
@@ -260,8 +261,11 @@ def main() -> None:
     from_block = block_near_time(rpc, int(time.time() - args.hours * 3600))
     print(f"scanning blocks {from_block}-{to_block} for Pons launches...",
           file=sys.stderr)
+    # Cover the ~15s snipe-tax window plus margin, in measured chain blocks.
+    snipe_window = rpc.blocks_for_seconds(30, floor=100, cap=2_000)
     launches = recent_launches(rpc, from_block, to_block,
-                               deep=not args.fast, limit=args.limit)
+                               deep=not args.fast, limit=args.limit,
+                               snipe_window_blocks=snipe_window)
 
     if args.json:
         print(json.dumps([asdict(l) for l in launches], indent=2))

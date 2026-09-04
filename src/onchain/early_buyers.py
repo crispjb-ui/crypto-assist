@@ -43,7 +43,9 @@ def analyze_launch(rpc: EvmRpc, token: str, pair: str,
     """creation_block overrides the pair-deploy binary search — required for
     singleton pools (Uniswap v4 PoolManager), where the shared contract's
     deploy block says nothing about this token's launch."""
-    window_blocks = window_blocks or config.EARLY_WINDOW_BLOCKS
+    if window_blocks is None:
+        window_blocks = config.EARLY_WINDOW_BLOCKS or \
+            rpc.blocks_for_seconds(config.EARLY_WINDOW_SECONDS)
     if creation_block is None:
         creation_block = rpc.find_deploy_block(pair)
     end_block = creation_block + window_blocks
