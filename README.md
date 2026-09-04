@@ -2,7 +2,29 @@
 
 On-chain diligence infrastructure for Claude Code, EVM-first. Purpose: identify bundled launches, sniper/offload wallet clusters, and farm projects quickly and consistently — and surface early projects worth deeper research.
 
-Primary target: **Robinhood Chain** (EVM, Arbitrum Orbit stack). The tooling is chain-agnostic EVM — everything chain-specific comes from `.env`, so it runs unchanged on Arbitrum, Base, Ethereum, or any other EVM chain. Note: Robinhood Chain's public RPC endpoints / chain ID / explorer are not hardcoded here because they could not be verified at build time — you supply them in `.env` (see below).
+Primary target: **Robinhood Chain** (EVM, Arbitrum Orbit stack, mainnet since July 2026). The tooling is chain-agnostic EVM — everything chain-specific comes from `.env`, so it runs unchanged on Arbitrum, Base, Ethereum, or any other EVM chain.
+
+## Robinhood Chain quickstart (verified values)
+
+| What | Value |
+|---|---|
+| Chain ID | `4663` |
+| Public RPC (rate-limited) | `https://rpc.mainnet.chain.robinhood.com` |
+| Paid RPC | dRPC serves Robinhood Chain — use your dashboard endpoint |
+| Explorer (Blockscout) | `https://robinhoodchain.blockscout.com` (API at `/api`) |
+| DexScreener slug | `robinhood` (dexscreener.com/robinhood) |
+| Pons V1 factory | `0xA5aAb3F0c6EeadF30Ef1D3Eb997108E976351feB` |
+| Pons V2 factory | `0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e` |
+
+Launchpads: **Pons** (ponsfamily.com — dominant, >100k launches, ~1% graduate; official contracts at github.com/ponsdotdev/ponsfamily) and **Long** (long.xyz — pairs launches against tokenized stocks like NVDA/TSLA; no public contracts repo found yet, so `pons.py`-style support for Long needs its factory address derived from a known launch tx first). DEXes with deployments on the chain include Uniswap (v3/v4), SushiSwap, Arcus, Rialto, Lighter.
+
+### Pons and the declared-bundle signal
+
+Pons V2 launches carry a snipe tax (99% decaying over ~15s at current factory settings) — and the launch call may declare up to 32 wallets **exempt** from it (`launchToken(..., address[] snipeTaxExemptions)`). That list is the operator's sniper bundle, self-published in the launch transaction. `src/onchain/pons.py` watches both factories, decodes the exemption list from calldata, classifies snipe-window curve buys into tax-free (bundle executing) vs taxed (outsiders), and tracks graduation:
+
+```bash
+python -m src.onchain.pons --hours 6
+```
 
 ## What this detects
 
