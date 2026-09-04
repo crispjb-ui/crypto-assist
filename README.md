@@ -72,6 +72,24 @@ python -m src.onchain.scan --max-age-hours 24 --min-liquidity-usd 20000
 
 Or in Claude Code: `/diligence 0xTOKEN`, `/scan-launches`.
 
+## The improvement loop
+
+Every `report.py` run is written to a local ledger (`data/diligence.db`,
+gitignored). Later, the outcome tracker labels each run with what actually
+happened and computes per-flag precision:
+
+```bash
+python -m src.onchain.outcomes update   # ≥24h later: rugged / dead / alive
+python -m src.onchain.outcomes stats    # per-flag precision + missed rugs
+```
+
+The `/improve-detectors` skill closes the loop: it reads those stats and
+adjusts `score.py` weights, tightens thresholds, or adds detectors for signals
+present in missed rugs — under guard rails (evidence thresholds, offline unit
+checks, deterministic scoring only). The more you use the tooling, the better
+calibrated it gets, and every change is committed with the evidence that
+justified it.
+
 ## Interpreting results
 
 - **Red-flag score ≥ 5**: treat as a farm until proven otherwise.

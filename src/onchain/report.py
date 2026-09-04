@@ -9,7 +9,7 @@ import json
 import sys
 from dataclasses import asdict
 
-from . import config, dexscreener
+from . import config, dexscreener, store
 from .clusters import analyze_clusters
 from .early_buyers import analyze_launch
 from .erc20 import inspect_token
@@ -22,7 +22,8 @@ def _fmt_amount(raw: int, decimals: int) -> str:
     return f"{raw / 10 ** decimals:,.2f}"
 
 
-def run(token: str, pair: str | None, bundle_only: bool, as_json: bool) -> int:
+def run(token: str, pair: str | None, bundle_only: bool, as_json: bool,
+        log: bool = True) -> int:
     rpc = EvmRpc()
     if config.EVM_CHAIN_ID:
         actual = rpc.chain_id()
@@ -56,6 +57,23 @@ def run(token: str, pair: str | None, bundle_only: bool, as_json: bool) -> int:
         holders = holder_stats(rpc, token, token_deploy, exclude={pair})
 
     verdict = evaluate(token_info, launch, clusters, holders)
+
+    if log:
+        try:
+            store.log_run(
+                token=token,
+                pair=pair,
+                kind="bundle-only" if bundle_only else "report",
+                score=verdict.score,
+                flags=[asdict(f) for f in verdict.flags],
+                notes=verdict.notes,
+                market=market,
+                data={"token": asdict(token_info), "launch": asdict(launch),
+                      "clusters": asdict(clusters),
+                      "holders": asdict(holders) if holders else None},
+            )
+        except Exception as exc:
+            print(f"note: run ledger write failed ({exc})", file=sys.stderr)
 
     if as_json:
         print(json.dumps({
@@ -104,8 +122,11 @@ def main() -> None:
     ap.add_argument("--bundle-only", action="store_true",
                     help="skip holder reconstruction (fewer RPC calls)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-log", action="store_true",
+                    help="skip writing this run to the outcome ledger")
     args = ap.parse_args()
-    sys.exit(run(args.token, args.pair, args.bundle_only, args.json))
+    sys.exit(run(args.token, args.pair, args.bundle_only, args.json,
+                 log=not args.no_log))
 
 
 if __name__ == "__main__":

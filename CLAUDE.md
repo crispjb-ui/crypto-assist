@@ -16,6 +16,16 @@ web3.py or other heavy deps without being asked.
 - `.claude/skills/` — user-facing workflows (`/diligence`, `/bundle-check`,
   `/scan-launches`).
 
+## Improvement loop
+
+Every `report.py` run is logged to `data/diligence.db` (gitignored).
+`outcomes.py update/stats` labels past runs with what actually happened and
+computes per-flag precision. When a session used the diligence skills, finish
+by running the two `outcomes` commands; if they show misses or badly
+calibrated flags, invoke the `improve-detectors` skill and follow its guard
+rails. Detector changes require evidence from the ledger and an offline unit
+check — never intuition alone.
+
 ## Rules
 
 - Zero-hallucination posture in all user-facing output: report only what was
