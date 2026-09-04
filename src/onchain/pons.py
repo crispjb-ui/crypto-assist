@@ -56,7 +56,9 @@ class PonsLaunch:
     tx_hash: str
     symbol: str = "?"
     declared_exemptions: list[str] = field(default_factory=list)
-    exemptions_known: bool = True  # False when the entrypoint wasn't decodable
+    # "exact": decoded from a known factory selector; "heuristic": address[]
+    # recovered from unrecognized (router) calldata; "opaque": nothing found.
+    exemption_source: str = "exact"
     graduated: bool = False
     # snipe-window trading (V2 only)
     exempt_buys: int = 0           # tax-free buys in the window = the bundle executing
@@ -68,32 +70,58 @@ def _addr(topic: str) -> str:
     return "0x" + topic[-40:]
 
 
-def exemptions_from_calldata(data: str) -> tuple[list[str], bool]:
-    """Decode the declared snipe-tax exemption list from a V2 launch tx.
+def _looks_like_address_word(w: str) -> bool:
+    return len(w) == 64 and w[:24] == "0" * 24 and int(w[24:], 16) != 0
 
-    Returns (addresses, known). known=False means an unrecognized entrypoint
-    (e.g. a new router) — absence of evidence, not evidence of absence.
+
+def _heuristic_address_array(body: str) -> list[str]:
+    """Best-effort recovery of the trailing address[] from unrecognized (router)
+    calldata: find length-prefixed runs of address-shaped words, take the last.
+    Launch entrypoints put snipeTaxExemptions last in every known layout."""
+    words = [body[i : i + 64] for i in range(0, len(body) - 63, 64)]
+    best: list[str] = []
+    for i, w in enumerate(words):
+        try:
+            n = int(w, 16)
+        except ValueError:
+            continue
+        if not (1 <= n <= 32) or i + n >= len(words) + 1:
+            continue
+        run = words[i + 1 : i + 1 + n]
+        if len(run) == n and all(_looks_like_address_word(x) for x in run):
+            # reject if the "length" word is itself part of a longer address run
+            # (offset words like 0x20 precede structs, not just arrays)
+            best = ["0x" + x[-40:] for x in run]
+    return best
+
+
+def exemptions_from_calldata(data: str) -> tuple[list[str], str]:
+    """Extract the declared snipe-tax exemption list from a V2 launch tx.
+
+    Returns (addresses, source): "exact" for known factory selectors,
+    "heuristic" for an address[] recovered from unrecognized router calldata,
+    "opaque" when nothing was found — absence of evidence, not evidence of
+    absence.
     """
     sel = data[:10].lower()
-    if sel == SEL_LAUNCH_PLAIN:
-        return [], True
-    if sel == SEL_LAUNCH_EXEMPT:
-        arr_slot = 3
-    elif sel == SEL_LAUNCH_FOR:
-        arr_slot = 4
-    else:
-        return [], False
     body = data[10:]
 
     def word(i: int) -> str:
         return body[i * 64 : (i + 1) * 64]
 
-    try:
-        offset = int(word(arr_slot), 16) // 32
-        count = int(word(offset), 16)
-        return ["0x" + word(offset + 1 + i)[-40:] for i in range(min(count, 64))], True
-    except (ValueError, IndexError):
-        return [], False
+    if sel == SEL_LAUNCH_PLAIN:
+        return [], "exact"
+    if sel in (SEL_LAUNCH_EXEMPT, SEL_LAUNCH_FOR):
+        arr_slot = 3 if sel == SEL_LAUNCH_EXEMPT else 4
+        try:
+            offset = int(word(arr_slot), 16) // 32
+            count = int(word(offset), 16)
+            return (["0x" + word(offset + 1 + i)[-40:]
+                     for i in range(min(count, 64))], "exact")
+        except (ValueError, IndexError):
+            return [], "opaque"
+    found = _heuristic_address_array(body)
+    return (found, "heuristic") if found else ([], "opaque")
 
 
 def block_near_time(rpc: EvmRpc, target_ts: int) -> int:
@@ -191,16 +219,28 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
     txs = rpc.batch([("eth_getTransactionByHash", [l.tx_hash]) for l in launches])
     symbols = rpc.batch([("eth_call", [{"to": l.token, "data": SEL_SYMBOL}, "latest"])
                          for l in launches])
+    unknown_entrypoints: dict[tuple[str, str], list] = {}
     for i, (launch, tx, sym) in enumerate(zip(launches, txs, symbols), 1):
         if isinstance(sym, str):
             launch.symbol = _decode_string(sym)
         launch.graduated = launch.token in graduated_tokens
         if launch.version == 2 and isinstance(tx, dict):
-            launch.declared_exemptions, launch.exemptions_known = \
-                exemptions_from_calldata(tx.get("input", ""))
+            calldata = tx.get("input", "")
+            launch.declared_exemptions, launch.exemption_source = \
+                exemptions_from_calldata(calldata)
+            if launch.exemption_source != "exact":
+                key = ((tx.get("to") or "?").lower(), calldata[:10].lower())
+                entry = unknown_entrypoints.setdefault(key, [0, launch.tx_hash])
+                entry[0] += 1
             snipe_window_activity(rpc, launch)
         if i % 10 == 0 or i == len(launches):
             print(f"  analyzed {i}/{len(launches)}", file=sys.stderr)
+
+    for (to, sel), (count, sample) in unknown_entrypoints.items():
+        print(f"note: {count} launch(es) via unrecognized entrypoint {to} "
+              f"selector {sel} (sample tx {sample}) — exemption lists for these "
+              "are heuristic or opaque; report this line to add exact support.",
+              file=sys.stderr)
     return launches
 
 
@@ -231,12 +271,14 @@ def main() -> None:
           f"(~{args.hours}h)\n")
     for l in launches:
         parts = [f"v{l.version}", l.symbol.ljust(10)[:10], l.token,
-                 f"blk {l.block}"]
+                 f"curve {l.curve_or_pool}", f"blk {l.block}"]
         if l.version == 2:
             if l.declared_exemptions:
-                parts.append(f"BUNDLED: {len(l.declared_exemptions)} declared exempt wallets")
-            elif not l.exemptions_known:
-                parts.append("exemptions: unknown entrypoint")
+                tag = "declared" if l.exemption_source == "exact" else "candidate"
+                parts.append(f"BUNDLED: {len(l.declared_exemptions)} {tag} "
+                             "exempt wallets")
+            elif l.exemption_source == "opaque":
+                parts.append("exemptions: opaque entrypoint")
             if l.exempt_buys:
                 parts.append(f"{l.exempt_buys} tax-free snipe buys "
                              f"({l.exempt_buy_quote / 1e18:.3f} quote)")
@@ -246,7 +288,7 @@ def main() -> None:
             parts.append("GRADUATED")
         print("  ".join(parts))
     print("\nDeep-check any token: python -m src.onchain.report <token> "
-          "--pair <curve_or_pool>")
+          "--pair <its curve address above>")
 
 
 if __name__ == "__main__":

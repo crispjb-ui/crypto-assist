@@ -16,9 +16,14 @@ description: Watch Pons launchpad launches on Robinhood Chain and expose declare
      buys are outsiders chasing.
    - **Graduated** status (curve completed into a locked Uniswap V4 pool —
      only ~1% of Pons launches graduate).
-   - `exemptions_known: false` means the launch came through an entrypoint the
-     decoder doesn't recognize — say "exemption list not decodable", never
-     "no exemptions".
+   - `exemption_source` tells you how the list was obtained: "exact" (decoded
+     from a known factory selector), "heuristic" (address[] recovered from
+     unrecognized router calldata — present it as *candidate* bundle wallets,
+     cross-check against which wallets actually bought tax-free), or "opaque"
+     (nothing decodable — say "exemption list not decodable", never "no
+     exemptions"). The scan prints any unrecognized entrypoint contract +
+     selector to stderr; relay that line to the user so exact support can be
+     added.
 3. Cross-reference interesting tokens with `/bundle-check` or `/diligence`
    (pass the curve address as `--pair` pre-graduation).
 4. A launch with a large declared bundle + fast offload after graduation is
