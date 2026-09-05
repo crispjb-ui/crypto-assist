@@ -99,6 +99,27 @@ def start_job(name: str) -> dict:
     return {"started": name}
 
 
+_code_cache: dict[str, bool] = {}
+_code_rpc: EvmRpc | None = None
+
+
+def _is_contract(address: str) -> bool:
+    """True if the address has bytecode (a contract, not an EOA trader).
+    Cached; a lookup failure is treated as EOA so we never over-exclude."""
+    a = address.lower()
+    if a in _code_cache:
+        return _code_cache[a]
+    global _code_rpc
+    try:
+        _code_rpc = _code_rpc or EvmRpc()
+        code = _code_rpc.get_code(a)
+        result = bool(code and code != "0x")
+    except Exception:
+        result = False
+    _code_cache[a] = result
+    return result
+
+
 def _redact(text: str) -> str:
     """Never show the RPC URL (it embeds the API key) in the UI."""
     if config.EVM_RPC_URL:
@@ -241,18 +262,27 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/wallets"):
             try:
                 everyone = wallets.leaderboard(min_tokens=1)
-                smart = wallets.smart_set()
                 # Headline wallets with a real sample (>=2 tokens); a single
                 # 100%-win launch is survivorship noise, not an edge.
                 repeat = [e for e in everyone if e["tokens"] >= 2]
+                # Drop contract addresses (routers/helpers route everyone's
+                # trades and are not traders). Verified by code check, cached.
+                traders, contracts = [], 0
                 for e in repeat:
-                    e["smart"] = e["wallet"] in smart
+                    if _is_contract(e["wallet"]):
+                        contracts += 1
+                    else:
+                        traders.append(e)
+                smart = wallets.smart_set()
+                for e in traders:
+                    e["smart"] = e["wallet"] in smart and not _is_contract(e["wallet"])
                 self._json(200, {
-                    "rows": repeat[:100],
-                    "smart_count": len(smart),
-                    "repeat_wallet_count": len(repeat),
+                    "rows": traders[:100],
+                    "smart_count": sum(1 for e in traders if e["smart"]),
+                    "repeat_wallet_count": len(traders),
                     "total_tracked": len(everyone),
                     "single_launch_count": len(everyone) - len(repeat),
+                    "contracts_excluded": contracts,
                 })
             except Exception as exc:
                 self._json(500, {"error": str(exc)})

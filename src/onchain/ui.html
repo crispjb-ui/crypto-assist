@@ -73,6 +73,7 @@
     <button data-tab="wallets">Wallets</button>
     <button data-tab="calibration">Calibration</button>
   </nav>
+  <button id="alerts" class="job" title="Desktop alerts when a smart-money wallet buys a new launch">🔔 alerts: off</button>
   <span id="status">connecting…</span>
 </header>
 
@@ -144,9 +145,37 @@ $$("nav button").forEach(b => b.onclick = () => {
   if (t === "setups") loadSetups();
 });
 
+// --- desktop alerts for smart-money buys ---
+let alertsOn = false;
+const notified = new Set();          // token -> already alerted
+let firstFeedLoaded = false;         // don't alert on the initial backlog
+$("#alerts").onclick = async () => {
+  if (!("Notification" in window)) { alert("This browser has no notifications."); return; }
+  if (Notification.permission !== "granted") await Notification.requestPermission();
+  alertsOn = Notification.permission === "granted";
+  $("#alerts").textContent = alertsOn ? "🔔 alerts: on" : "🔔 alerts: blocked";
+};
+function maybeAlert(rows) {
+  if (!alertsOn) return;
+  for (const x of rows) {
+    if ((x.smart || 0) > 0 && !notified.has(x.token)) {
+      notified.add(x.token);
+      if (firstFeedLoaded) {
+        const n = new Notification(`SMART MONEY: ${x.symbol}`, {
+          body: `${x.smart} smart wallet(s) bought — ${x.venue}\n${x.detail}`,
+          tag: x.token,
+        });
+        n.onclick = () => window.focus();
+      }
+    }
+  }
+  firstFeedLoaded = true;
+}
+
 async function refresh() {
   try {
     const d = await (await fetch("/api/feed")).json();
+    maybeAlert(d.rows || []);
     $("#status").textContent = d.scanning ? "scanning…" :
       d.last_scan ? "last scan " + new Date(d.last_scan*1000).toLocaleTimeString()
                   : "waiting for first scan…";
@@ -203,7 +232,8 @@ async function loadWallets() {
     `(≥4 tokens, ≥60% wins, net-positive each quote). ` +
     `${d.repeat_wallet_count ?? 0} traded ≥2 launches (shown below). ` +
     `${d.single_launch_count ?? 0} of ${d.total_tracked ?? 0} tracked wallets ` +
-    `hit only one launch — a single 100% win is not signal and is hidden.`;
+    `hit only one launch — a single 100% win is not signal and is hidden. ` +
+    `${d.contracts_excluded ?? 0} contract address(es) (routers/helpers) excluded.`;
   $("#wallets tbody").innerHTML =
     `<tr><th>wallet</th><th>tokens</th><th>wins</th><th>win rate</th>
      <th>realized</th><th></th></tr>` +
