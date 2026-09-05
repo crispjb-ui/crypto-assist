@@ -42,10 +42,22 @@ state = {
     "setups": {"rows": [], "ts": None},
 }
 
+_setups_running = threading.Lock()
+
+
 def _setups_job() -> None:
-    rows = setups.scan()
-    with state["lock"]:
-        state["setups"] = {"rows": rows, "ts": int(time.time())}
+    # Background sweep and the manual button must never overlap — two
+    # concurrent sweeps double the GeckoTerminal call rate and guarantee 429s.
+    if not _setups_running.acquire(blocking=False):
+        print("note: setups sweep already running; skipping duplicate",
+              flush=True)
+        return
+    try:
+        rows = setups.scan()
+        with state["lock"]:
+            state["setups"] = {"rows": rows, "ts": int(time.time())}
+    finally:
+        _setups_running.release()
 
 
 def _probe_entrypoints_job() -> None:
