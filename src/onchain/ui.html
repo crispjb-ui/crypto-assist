@@ -208,7 +208,8 @@ async function refresh() {
     const only = $("#watchonly").checked;
     let rows = d.rows;
     if (only) rows = rows.filter(x =>
-      x.cls === "watch" || x.smart > 0 || x.setup);   // candidates = never "bad"
+      x.cls !== "bad" && (x.cls === "watch" || x.smart > 0 || x.setup));
+      // candidates = never "bad" — including rows a deep scan reclassified
     const scoreTag = x => x.score == null ? ""
       : ` <span class="${x.score >= 5 ? "score-bad" : x.score >= 2 ? "score-mid"
                         : "score-ok"}">score ${x.score}</span>`;

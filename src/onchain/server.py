@@ -183,6 +183,34 @@ def opportunity(demand: int, smart: int, graduated: bool, insider: int,
     return score, ", ".join(reasons) or "no activity"
 
 
+def apply_diligence_score(row: dict) -> None:
+    """Fold the latest deep-scan diligence score into the ranking, so a token
+    that scanned AVOID can never hold a top candidate slot on cheap signals
+    alone (organic demand + smart wallet is exactly what a farmed launch
+    manufactures). Idempotent — opp/cls/reason are always re-derived from the
+    stored base values, so re-applying after a quick scan never compounds."""
+    if "base_opp" not in row:
+        row["base_opp"] = row["opp"]
+        row["base_cls"] = row["cls"]
+        row["base_reason"] = row["reason"]
+    opp, cls, reason = row["base_opp"], row["base_cls"], row["base_reason"]
+    score = row.get("score")
+    if score is not None:
+        if score >= 5:
+            # README threshold: score >= 5 = treat as a farm until proven
+            # otherwise. Reclassify so the candidates-only filter drops it.
+            cls = "bad"
+            opp -= 3 * score
+            reason += (f", deep scan: {'AVOID' if score >= 8 else 'HIGH RISK'}"
+                       f" ({score})")
+        elif score >= 2:
+            opp -= score
+            reason += f", deep scan: caution ({score})"
+        else:
+            reason += ", deep scan: no red flags"
+    row["opp"], row["cls"], row["reason"] = round(opp, 1), cls, reason
+
+
 def scan_once() -> None:
     rpc = EvmRpc()
     to_block = rpc.latest_block()
@@ -250,13 +278,16 @@ def scan_once() -> None:
                        + (f" — SMART MONEY x{len(smart_hits)}" if smart_hits else "")),
         }
 
-    # attach the latest diligence score from the ledger, when one exists
+    # attach the latest diligence score from the ledger, when one exists,
+    # and fold it into the ranking (a scanned-AVOID token must not rank #1)
     try:
         scores = store.latest_scores(list(rows))
         for token, row in rows.items():
             row["score"] = scores.get(token)
     except Exception:
         pass
+    for row in rows.values():
+        apply_diligence_score(row)
 
     with state["lock"]:
         state["feed"].update(rows)
@@ -428,6 +459,15 @@ class Handler(BaseHTTPRequestHandler):
             payload = report.collect(
                 token, pair, bundle_only=bool(req.get("bundle_only")),
                 creation_block=int(creation_block) if creation_block else None)
+            # re-rank the feed row right away — a quick scan that came back
+            # AVOID must fall out of the top slots before the next feed cycle
+            sc = (payload.get("verdict") or {}).get("score")
+            if sc is not None:
+                with state["lock"]:
+                    row = state["feed"].get(token.lower())
+                    if row is not None:
+                        row["score"] = sc
+                        apply_diligence_score(row)
             self._json(200, payload)
         except report.NoPairError as exc:
             self._json(404, {"error": str(exc)})
