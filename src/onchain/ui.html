@@ -348,6 +348,9 @@ function render(d) {
   h += `\nlaunch window: ${L.buys_in_creation_block} creation-block buys, ` +
        `${L.buyers.length} early buyers, ${C.fresh_wallet_count} fresh, ` +
        `${C.offloaded_count} offloaded\n`;
+  if (d.curve) h += `curve: ${d.curve.exempt_buys} tax-free snipes ` +
+       `(${(d.curve.exempt_buy_quote/1e18).toFixed(2)}q), ` +
+       `${d.curve.taxed_buys} taxed organic buys\n`;
   for (const [funder, ws] of Object.entries(C.funding_clusters))
     h += `funding cluster ${esc(funder)} → ${ws.length} buyers\n`;
   if (d.holders) h += `holders ${d.holders.holder_count}, ` +

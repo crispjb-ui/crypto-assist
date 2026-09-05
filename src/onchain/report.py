@@ -26,6 +26,34 @@ class NoPairError(RuntimeError):
     pass
 
 
+def _curve_snipe_activity(rpc, token: str, pair: str, creation_block: int):
+    """Execution-truth bundle check for Pons-curve pairs: classify launch-window
+    CurveBuy events into tax-free (insider/exempt) vs taxed (organic) buys.
+    Returns a PonsLaunch carrying the counts, or None when the pair emits no
+    curve events (any non-Pons pool)."""
+    from . import explorer
+    from .pons import PonsLaunch, TOPIC_CURVE_BUY, snipe_window_activity
+    try:
+        window = rpc.blocks_for_seconds(30, floor=100, cap=2_000)
+        probe = rpc.get_logs(creation_block, creation_block + window,
+                             address=pair, topics=[TOPIC_CURVE_BUY])
+        if not probe:
+            return None
+        deployer = ""
+        txh = explorer.contract_creation_tx(pair)
+        if txh:
+            tx = rpc.call("eth_getTransactionByHash", [txh])
+            if isinstance(tx, dict):
+                deployer = (tx.get("from") or "").lower()
+        pl = PonsLaunch(version=2, token=token.lower(), curve_or_pool=pair,
+                        deployer=deployer, block=creation_block, tx_hash="")
+        snipe_window_activity(rpc, pl, window_blocks=window)
+        return pl
+    except Exception as exc:
+        print(f"note: curve snipe check skipped ({exc})", file=sys.stderr)
+        return None
+
+
 def collect(token: str, pair: str | None = None, bundle_only: bool = False,
             creation_block: int | None = None, log: bool = True,
             rpc: EvmRpc | None = None) -> dict:
@@ -68,6 +96,7 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
     token_info = inspect_token(rpc, token)
     launch = analyze_launch(rpc, token, pair, creation_block=creation_block)
     clusters = analyze_clusters(rpc, token, launch)
+    curve = _curve_snipe_activity(rpc, token, pair, launch.creation_block)
     holders = None
     if not bundle_only:
         from .early_buyers import resolve_creation_block
@@ -79,6 +108,15 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
         holders = holder_stats(rpc, token, token_deploy, exclude={pair})
 
     verdict = evaluate(token_info, launch, clusters, holders)
+    if curve is not None:
+        if curve.exempt_buys >= 3:
+            verdict.add(3, f"{curve.exempt_buys} tax-free snipe buys "
+                           f"({curve.exempt_buy_quote / 1e18:.2f} quote) in the "
+                           "launch window — execution-proven bundle",
+                        "curve-bundle-execution")
+        elif curve.exempt_buys >= 1:
+            verdict.add(1, f"{curve.exempt_buys} tax-free snipe buy(s) in the "
+                           "launch window", "curve-bundle-execution-low")
     payload = {
         "token": asdict(token_info),
         "pair": pair,
@@ -86,6 +124,11 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
         "launch": asdict(launch),
         "clusters": asdict(clusters),
         "holders": asdict(holders) if holders else None,
+        "curve": ({"exempt_buys": curve.exempt_buys,
+                   "taxed_buys": curve.taxed_buys,
+                   "exempt_buy_quote": curve.exempt_buy_quote,
+                   "exempt_buyer_wallets": curve.exempt_buyer_wallets}
+                  if curve is not None else None),
         "verdict": asdict(verdict),
         "verdict_line": verdict_line(verdict),
     }
