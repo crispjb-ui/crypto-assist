@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import long as long_mod
-from . import pons, report
+from . import pons, report, wallets
 from .pons import block_near_time
 from .rpc import EvmRpc
 
@@ -62,29 +62,44 @@ def scan_once() -> None:
     snipe_window = rpc.blocks_for_seconds(30, floor=100, cap=2_000)
     long_window = rpc.blocks_for_seconds(300, floor=200, cap=50_000)
 
+    try:
+        smart = wallets.smart_set()
+    except Exception:
+        smart = set()
+
     rows: dict[str, dict] = {}
     for l in pons.recent_launches(rpc, from_block, to_block, deep=True,
                                   limit=60, snipe_window_blocks=snipe_window):
+        smart_hits = smart.intersection(l.snipe_buyers)
+        cls = classify_pons(l)
+        if smart_hits and cls == "quiet":
+            cls = "watch"
         rows[l.token] = {
             "venue": f"pons v{l.version}", "symbol": l.symbol, "token": l.token,
             "pair": l.curve_or_pool, "block": l.block,
-            "cls": classify_pons(l), "graduated": l.graduated,
+            "cls": cls, "graduated": l.graduated, "smart": len(smart_hits),
             "detail": (f"{l.exempt_buys} tax-free snipes "
                        f"({l.exempt_buy_quote / 1e18:.2f}q), "
                        f"{l.taxed_buys} taxed buys"
                        + (f", {len(l.declared_exemptions)} "
                           f"{'declared' if l.exemption_source == 'exact' else 'candidate'}"
-                          " exempt wallets" if l.declared_exemptions else "")),
+                          " exempt wallets" if l.declared_exemptions else "")
+                       + (f" — SMART MONEY x{len(smart_hits)}" if smart_hits else "")),
         }
     for l in long_mod.recent_launches(rpc, from_block, to_block, deep=True,
                                       limit=40, window_blocks=long_window):
+        smart_hits = smart.intersection(l.buyer_wallets)
+        cls = classify_long(l)
+        if smart_hits and cls == "quiet":
+            cls = "watch"
         rows[l.token] = {
             "venue": f"long/{l.paired_symbol}", "symbol": l.symbol,
             "token": l.token, "pair": long_mod.POOL_MANAGER,
             "creation_block": l.block, "block": l.block,
-            "cls": classify_long(l), "graduated": False,
+            "cls": cls, "graduated": False, "smart": len(smart_hits),
             "detail": (f"{l.early_buys} early buys / {l.early_buyers} wallets, "
-                       f"{l.offloaded_top}/10 top offloaded"),
+                       f"{l.offloaded_top}/10 top offloaded"
+                       + (f" — SMART MONEY x{len(smart_hits)}" if smart_hits else "")),
         }
 
     with state["lock"]:

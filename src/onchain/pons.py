@@ -64,6 +64,7 @@ class PonsLaunch:
     exempt_buys: int = 0           # tax-free buys in the window = the bundle executing
     taxed_buys: int = 0            # outsiders paying the decaying tax
     exempt_buy_quote: int = 0      # total quote spent by tax-free buyers (wei)
+    snipe_buyers: list[str] = field(default_factory=list)  # distinct window buyers
 
 
 def _addr(topic: str) -> str:
@@ -163,8 +164,10 @@ def snipe_window_activity(rpc: EvmRpc, launch: PonsLaunch,
             continue
         quote_in = int(data[0:64], 16)
         tax = int(data[192:256], 16)
+        buyer = _addr(log["topics"][1])
+        if buyer not in launch.snipe_buyers:
+            launch.snipe_buyers.append(buyer)
         if tax == 0:
-            buyer = _addr(log["topics"][1])
             if buyer != launch.deployer:
                 launch.exempt_buys += 1
                 launch.exempt_buy_quote += quote_in

@@ -158,6 +158,14 @@ def main() -> None:
             traceback.print_exc()
             failures += 1
 
+    _stage("wallet-intelligence ingest")
+    try:
+        from . import wallets
+        wallets.scan(hours=args.pons_hours, limit=120)
+    except Exception:
+        traceback.print_exc()
+        failures += 1
+
     _stage("candidate shortlist")
     try:
         print_shortlist(pons_launches, long_launches, run_started)

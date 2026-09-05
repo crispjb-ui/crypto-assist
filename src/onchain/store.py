@@ -38,7 +38,45 @@ CREATE TABLE IF NOT EXISTS outcomes (
     details_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_token ON runs(token);
+CREATE TABLE IF NOT EXISTS wallet_trades (
+    wallet TEXT NOT NULL,
+    token TEXT NOT NULL,
+    spent REAL NOT NULL DEFAULT 0,      -- quote units (ETH) into the curve
+    received REAL NOT NULL DEFAULT 0,   -- quote units back out
+    trades INTEGER NOT NULL DEFAULT 0,
+    last_ts INTEGER NOT NULL,
+    PRIMARY KEY (wallet, token)
+);
+CREATE TABLE IF NOT EXISTS wallet_scans (
+    token TEXT PRIMARY KEY,             -- launches already ingested (idempotence)
+    ts INTEGER NOT NULL
+);
 """
+
+
+def wallet_scan_done(token: str) -> bool:
+    with connect() as conn:
+        return conn.execute("SELECT 1 FROM wallet_scans WHERE token = ?",
+                            (token.lower(),)).fetchone() is not None
+
+
+def mark_wallet_scan(token: str) -> None:
+    with connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO wallet_scans (token, ts) "
+                     "VALUES (?, strftime('%s','now'))", (token.lower(),))
+
+
+def upsert_wallet_trade(wallet: str, token: str, spent: float,
+                        received: float, trades: int) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO wallet_trades (wallet, token, spent, received, trades, last_ts) "
+            "VALUES (?,?,?,?,?,strftime('%s','now')) "
+            "ON CONFLICT(wallet, token) DO UPDATE SET "
+            "spent = spent + excluded.spent, received = received + excluded.received, "
+            "trades = trades + excluded.trades, last_ts = excluded.last_ts",
+            (wallet.lower(), token.lower(), spent, received, trades),
+        )
 
 
 def connect() -> sqlite3.Connection:
