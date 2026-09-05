@@ -37,6 +37,13 @@ def latest_boosted() -> list[dict]:
     return body if isinstance(body, list) else []
 
 
+def search_pairs(query: str) -> list[dict]:
+    """Free-text pair search (symbol or name). Caller must filter by chain and
+    exact symbol — search matches loosely."""
+    body = _get(f"/latest/dex/search?q={query}")
+    return body.get("pairs") or []
+
+
 def best_pair_for_token(token_address: str, chain_id: str | None = None) -> dict | None:
     """Highest-liquidity pair for the token, optionally restricted to one chain."""
     pairs = token_pairs(token_address)

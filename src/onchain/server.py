@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import config
 from . import long as long_mod
-from . import outcomes, pons, report, setups, store, wallets
+from . import outcomes, pons, prices, report, setups, store, wallets
 from .pons import block_near_time
 from .rpc import EvmRpc
 
@@ -404,8 +404,24 @@ class Handler(BaseHTTPRequestHandler):
                 smart = wallets.smart_set()
                 for e in traders:
                     e["smart"] = e["wallet"] in smart and not _is_contract(e["wallet"])
+                # display-only USD conversion at CURRENT DexScreener prices;
+                # unpriced quotes are named, never silently dropped
+                quote_syms = sorted({q for e in traders
+                                     for q in e["realized_by_quote"]})
+                try:
+                    px = prices.quote_prices_usd(quote_syms)
+                except Exception:
+                    px = {}
+                for e in traders:
+                    usd, unpriced = prices.usd_realized(
+                        e["realized_by_quote"], px)
+                    e["usd_realized"] = round(usd, 2) if usd is not None else None
+                    e["usd_unpriced"] = unpriced
+                traders.sort(key=lambda e: (-e["win_rate"],
+                                            -(e["usd_realized"] or 0)))
                 self._json(200, {
                     "rows": traders[:100],
+                    "quote_prices_usd": px,
                     "smart_count": sum(1 for e in traders if e["smart"]),
                     "repeat_wallet_count": len(traders),
                     "total_tracked": len(everyone),

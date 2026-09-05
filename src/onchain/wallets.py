@@ -106,6 +106,8 @@ def ingest_long_trades(rpc: EvmRpc, token: str, paired: str, paired_symbol: str,
     for wallet, (spent, received, trades) in agg.items():
         store.upsert_wallet_trade(wallet, token, spent, received, trades,
                                   quote_symbol=paired_symbol or "?")
+    if paired_symbol:
+        store.remember_quote_token(paired_symbol, paired)  # for USD pricing
     return len(pr_in) + len(pr_out)
 
 

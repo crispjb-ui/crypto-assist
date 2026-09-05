@@ -264,18 +264,29 @@ async function loadWallets() {
     `${d.repeat_wallet_count ?? 0} traded ≥2 launches (shown below). ` +
     `${d.single_launch_count ?? 0} of ${d.total_tracked ?? 0} tracked wallets ` +
     `hit only one launch — a single 100% win is not signal and is hidden. ` +
-    `${d.contracts_excluded ?? 0} contract address(es) (routers/helpers) excluded.`;
+    `${d.contracts_excluded ?? 0} contract address(es) (routers/helpers) excluded. ` +
+    `USD column = quote units × current DexScreener price (what those units ` +
+    `are worth now, not at realization time).`;
+  const usdCell = r => {
+    if (r.usd_realized == null) return '<span class="detail">unpriced</span>';
+    const v = r.usd_realized;
+    const s = "≈ " + (v < 0 ? "-" : "+") + "$" +
+      Math.abs(v).toLocaleString(undefined, {maximumFractionDigits: 0});
+    return esc(s) + (r.usd_unpriced && r.usd_unpriced.length
+      ? ` <span class="detail">(excl. ${esc(r.usd_unpriced.join(", "))})</span>` : "");
+  };
   $("#wallets tbody").innerHTML =
     `<tr><th>wallet</th><th>tokens</th><th>wins</th><th>win rate</th>
-     <th>realized</th><th></th></tr>` +
+     <th>realized</th><th>≈ USD now</th><th></th></tr>` +
     (rows.map(r => `<tr>
       <td>${esc(r.wallet)}</td><td>${r.tokens}</td><td>${r.wins}</td>
       <td>${Math.round(r.win_rate*100)}%</td>
       <td>${esc(Object.entries(r.realized_by_quote || {})
             .map(([q,v]) => (v>=0?"+":"") + v.toFixed(3) + " " + q).join(", "))}</td>
+      <td>${usdCell(r)}</td>
       <td>${r.smart ? '<span class="smarttag">SMART</span>' : ""}</td>
     </tr>`).join("") ||
-    '<tr><td class="detail" colspan="6">No wallet has traded ≥2 launches yet. ' +
+    '<tr><td class="detail" colspan="7">No wallet has traded ≥2 launches yet. ' +
     'Most launch wallets here are single-use — keep ingesting; if repeat ' +
     'wallets stay near zero, this chain’s edge is launch-coordination ' +
     'detection, not wallet-shadowing.</td></tr>');

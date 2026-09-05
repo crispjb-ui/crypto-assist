@@ -53,6 +53,12 @@ CREATE TABLE IF NOT EXISTS wallet_scans (
     token TEXT PRIMARY KEY,             -- launches already ingested (idempotence)
     ts INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS quote_tokens (
+    symbol TEXT NOT NULL,               -- quote symbol as stored on trades
+    chain TEXT NOT NULL,
+    address TEXT NOT NULL,              -- token address, for USD pricing
+    PRIMARY KEY (symbol, chain)
+);
 """
 
 
@@ -89,6 +95,26 @@ def upsert_wallet_trade(wallet: str, token: str, spent: float,
             (wallet.lower(), token.lower(), spent, received, trades,
              quote_symbol, config.CHAIN_KEY),
         )
+
+
+def remember_quote_token(symbol: str, address: str) -> None:
+    """Record which token address a quote symbol refers to on this chain, so
+    realized PnL can later be priced in USD without guessing from the symbol."""
+    if not symbol or not address:
+        return
+    with connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO quote_tokens (symbol, chain, "
+                     "address) VALUES (?,?,?)",
+                     (symbol, config.CHAIN_KEY, address.lower()))
+
+
+def quote_token_map() -> dict[str, str]:
+    """symbol -> token address for the current chain."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT symbol, address FROM quote_tokens WHERE chain = ?",
+            (config.CHAIN_KEY,)).fetchall()
+    return dict(rows)
 
 
 def connect() -> sqlite3.Connection:
