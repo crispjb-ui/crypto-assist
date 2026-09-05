@@ -19,9 +19,9 @@ def _get(params: dict) -> dict | list | None:
         return None
     if config.EXPLORER_API_KEY:
         params = {**params, "apikey": config.EXPLORER_API_KEY}
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            resp = requests.get(config.EXPLORER_API_URL, params=params, timeout=20)
+            resp = requests.get(config.EXPLORER_API_URL, params=params, timeout=8)
             resp.raise_for_status()
             body = resp.json()
             # Etherscan-compat: status "0" with "No transactions found" is a valid empty.
@@ -30,9 +30,9 @@ def _get(params: dict) -> dict | list | None:
                 raise requests.RequestException(result)
             return result
         except (requests.RequestException, ValueError):
-            if attempt == 2:
+            if attempt >= 1:      # final attempt: fail fast, no pointless sleep
                 return None
-            time.sleep(2 ** attempt)
+            time.sleep(1)
     return None
 
 

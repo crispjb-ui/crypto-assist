@@ -76,16 +76,28 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
             "No pair found — DexScreener does not index this token yet. "
             "Provide the pool/curve address explicitly.")
 
+    import time as _time
+    timings: dict[str, float] = {}
+
+    def _mark(name: str, t0: float) -> None:
+        timings[name] = round(_time.monotonic() - t0, 2)
+
+    # Derive the creation block from DexScreener's pairCreatedAt whenever we
+    # have it — for a NEW pair the explorer usually hasn't indexed the
+    # creation tx yet, and the fallback deploy-block binary search (~25
+    # sequential calls) was the main cost of scanning fresh launches.
+    if creation_block is None and (market or {}).get("pairCreatedAt"):
+        from .pons import block_near_time
+        t0 = _time.monotonic()
+        creation_block = block_near_time(
+            rpc, int(market["pairCreatedAt"]) // 1000)
+        _mark("creation_from_timestamp", t0)
+
     if len(pair) > 42:
         # A 32-byte id, not an address: a Uniswap v4 poolId (DexScreener
         # reports these for v4 markets). The liquidity lives in the shared
-        # PoolManager, and the launch block comes from the pair's creation
-        # timestamp since the singleton's deploy block is meaningless here.
+        # PoolManager; the singleton's deploy block is meaningless here.
         from .long import POOL_MANAGER
-        from .pons import block_near_time
-        created_ms = (market or {}).get("pairCreatedAt")
-        if creation_block is None and created_ms:
-            creation_block = block_near_time(rpc, int(created_ms) // 1000)
         if creation_block is None:
             raise NoPairError(
                 "This token trades in a Uniswap v4 pool (poolId, no pool "
@@ -93,8 +105,12 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
                 "feeds print it per token.")
         pair = POOL_MANAGER
 
+    t0 = _time.monotonic()
     token_info = inspect_token(rpc, token, include_source=False)
+    _mark("metadata", t0)
+    t0 = _time.monotonic()
     launch = analyze_launch(rpc, token, pair, creation_block=creation_block)
+    _mark("launch_window", t0)
 
     # The four remaining phases are independent given `launch` — run them
     # concurrently (each on its own RPC client; a shared requests.Session is
@@ -118,12 +134,21 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
             token_deploy = launch.creation_block
         return holder_stats(hrpc, token, token_deploy, exclude={pair})
 
+    def _timed(name: str, fn, *a):
+        t0 = _time.monotonic()
+        try:
+            return fn(*a)
+        finally:
+            _mark(name, t0)
+
     with ThreadPoolExecutor(max_workers=4) as ex:
-        f_source = ex.submit(get_contract_source, token)
-        f_curve = ex.submit(_curve_snipe_activity, _clone(), token, pair,
-                            launch.creation_block)
-        f_clusters = ex.submit(analyze_clusters, _clone(), token, launch)
-        f_holders = ex.submit(_holders_phase) if not bundle_only else None
+        f_source = ex.submit(_timed, "source", get_contract_source, token)
+        f_curve = ex.submit(_timed, "curve_bundle", _curve_snipe_activity,
+                            _clone(), token, pair, launch.creation_block)
+        f_clusters = ex.submit(_timed, "clusters", analyze_clusters,
+                               _clone(), token, launch)
+        f_holders = (ex.submit(_timed, "holders", _holders_phase)
+                     if not bundle_only else None)
         clusters = f_clusters.result()
         curve = f_curve.result()
         holders = f_holders.result() if f_holders is not None else None
@@ -131,6 +156,10 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
             apply_source_checks(token_info, f_source.result())
         except Exception as exc:
             print(f"note: source check skipped ({exc})", file=sys.stderr)
+    print("scan timings: " + ", ".join(f"{k}={v}s" for k, v in
+                                       sorted(timings.items(),
+                                              key=lambda kv: -kv[1])),
+          file=sys.stderr)
 
     verdict = evaluate(token_info, launch, clusters, holders)
     if curve is not None:
@@ -156,6 +185,7 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
                   if curve is not None else None),
         "verdict": asdict(verdict),
         "verdict_line": verdict_line(verdict),
+        "timings": timings,
     }
     if log:
         try:

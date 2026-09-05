@@ -356,6 +356,9 @@ function render(d) {
   if (d.holders) h += `holders ${d.holders.holder_count}, ` +
        `top10 ${d.holders.top10_pct.toFixed(1)}%, ` +
        `burned ${d.holders.burned_pct.toFixed(1)}%\n`;
+  if (d.timings) h += `<span class="note">\ntimings: ` +
+       esc(Object.entries(d.timings).sort((a,b)=>b[1]-a[1])
+           .map(([k,v])=>`${k} ${v}s`).join(", ")) + `</span>\n`;
   $("#result").innerHTML = h;
 }
 refresh(); setInterval(refresh, 20000);

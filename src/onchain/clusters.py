@@ -15,7 +15,7 @@ from .rpc import EvmRpc, RpcError
 # Funding traces are 1-2 explorer HTTP calls per wallet; run them in parallel
 # and only for the earliest buyers (where coordination shows). This is the
 # difference between a ~90s and a ~10s quick scan.
-FUNDING_TRACE_MAX = 20
+FUNDING_TRACE_MAX = 12
 FUNDING_TRACE_WORKERS = 8
 
 

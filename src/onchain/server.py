@@ -214,6 +214,8 @@ def scan_once() -> None:
         rows[l.token] = {
             "venue": f"pons v{l.version}", "symbol": l.symbol, "token": l.token,
             "pair": l.curve_or_pool, "block": l.block,
+            "creation_block": l.block,   # feed knows the launch block — quick
+                                         # scans then skip creation resolution
             "cls": cls, "graduated": l.graduated, "smart": len(smart_hits),
             "setup": is_setup, "opp": round(opp, 1), "reason": reason,
             "detail": (f"{l.exempt_buys} tax-free snipes "
