@@ -48,6 +48,23 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
             "No pair found — DexScreener does not index this token yet. "
             "Provide the pool/curve address explicitly.")
 
+    if len(pair) > 42:
+        # A 32-byte id, not an address: a Uniswap v4 poolId (DexScreener
+        # reports these for v4 markets). The liquidity lives in the shared
+        # PoolManager, and the launch block comes from the pair's creation
+        # timestamp since the singleton's deploy block is meaningless here.
+        from .long import POOL_MANAGER
+        from .pons import block_near_time
+        created_ms = (market or {}).get("pairCreatedAt")
+        if creation_block is None and created_ms:
+            creation_block = block_near_time(rpc, int(created_ms) // 1000)
+        if creation_block is None:
+            raise NoPairError(
+                "This token trades in a Uniswap v4 pool (poolId, no pool "
+                "address). Provide the launch/creation block — the launch "
+                "feeds print it per token.")
+        pair = POOL_MANAGER
+
     token_info = inspect_token(rpc, token)
     launch = analyze_launch(rpc, token, pair, creation_block=creation_block)
     clusters = analyze_clusters(rpc, token, launch)
