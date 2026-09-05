@@ -143,6 +143,33 @@ def classify_long(l) -> str:
     return "quiet"
 
 
+def opportunity(demand: int, smart: int, graduated: bool, insider: int,
+                offloaded: int, is_setup: bool) -> tuple[float, str]:
+    """Rank a launch by research-worthiness from cheap signals already gathered.
+    NOT a buy score — it orders the feed so the most interesting rise to the top
+    instead of pure recency. Positive: organic demand, smart money, graduation,
+    matching accumulation setup. Negative: insider snipes, offload."""
+    score = 0.0
+    reasons = []
+    if smart:
+        score += 6 * smart
+        reasons.append(f"{smart} smart wallet(s)")
+    if is_setup:
+        score += 8
+        reasons.append("accumulation setup")
+    if graduated:
+        score += 4
+        reasons.append("graduated")
+    if demand:
+        score += min(demand, 40) * 0.4
+        reasons.append(f"{demand} organic buys")
+    score -= 3 * insider
+    score -= 2 * offloaded
+    if insider:
+        reasons.append(f"-{insider} insider")
+    return score, ", ".join(reasons) or "no activity"
+
+
 def scan_once() -> None:
     rpc = EvmRpc()
     to_block = rpc.latest_block()
@@ -155,6 +182,10 @@ def scan_once() -> None:
     except Exception:
         smart = set()
 
+    with state["lock"]:
+        setup_tokens = {r.get("token") for r in state["setups"]["rows"]
+                        if r.get("token")}
+
     entrypoints: dict = {}
     rows: dict[str, dict] = {}
     for l in pons.recent_launches(rpc, from_block, to_block, deep=True,
@@ -164,10 +195,15 @@ def scan_once() -> None:
         cls = classify_pons(l)
         if smart_hits and cls == "quiet":
             cls = "watch"
+        is_setup = l.token in setup_tokens
+        insider = l.exempt_buys + len(l.declared_exemptions)
+        opp, reason = opportunity(l.taxed_buys, len(smart_hits), l.graduated,
+                                  insider, 0, is_setup)
         rows[l.token] = {
             "venue": f"pons v{l.version}", "symbol": l.symbol, "token": l.token,
             "pair": l.curve_or_pool, "block": l.block,
             "cls": cls, "graduated": l.graduated, "smart": len(smart_hits),
+            "setup": is_setup, "opp": round(opp, 1), "reason": reason,
             "detail": (f"{l.exempt_buys} tax-free snipes "
                        f"({l.exempt_buy_quote / 1e18:.2f}q), "
                        f"{l.taxed_buys} taxed buys"
@@ -185,11 +221,15 @@ def scan_once() -> None:
         cls = classify_long(l)
         if smart_hits and cls == "quiet":
             cls = "watch"
+        is_setup = l.token in setup_tokens
+        opp, reason = opportunity(l.early_buyers, len(smart_hits), False,
+                                  0, l.offloaded_top, is_setup)
         rows[l.token] = {
             "venue": f"long/{l.paired_symbol}", "symbol": l.symbol,
             "token": l.token, "pair": long_mod.POOL_MANAGER,
             "creation_block": l.block, "block": l.block,
             "cls": cls, "graduated": False, "smart": len(smart_hits),
+            "setup": is_setup, "opp": round(opp, 1), "reason": reason,
             "detail": (f"{l.early_buys} early buys / {l.early_buyers} wallets, "
                        f"{l.offloaded_top}/10 top offloaded"
                        + (f" — SMART MONEY x{len(smart_hits)}" if smart_hits else "")),
@@ -253,7 +293,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, b"ui.html missing", "text/plain")
         elif self.path.startswith("/api/feed"):
             with state["lock"]:
-                rows = sorted(state["feed"].values(), key=lambda r: -r["block"])
+                # rank by opportunity, then recency — best rise to the top
+                rows = sorted(state["feed"].values(),
+                              key=lambda r: (-r.get("opp", 0), -r["block"]))
                 self._json(200, {"rows": rows, "last_scan": state["last_scan"],
                                  "scanning": state["scanning"],
                                  "last_error": state["last_error"],

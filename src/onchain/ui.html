@@ -32,6 +32,7 @@
        vertical-align:top; word-break:break-all; text-align:left; }
   th { color:var(--dim); font-weight:600; font-size:11px; }
   .sym { font-weight:600; white-space:nowrap; }
+  .rank { font-weight:700; color:var(--accent); white-space:nowrap; }
   .venue { color:var(--dim); white-space:nowrap; }
   .pill { display:inline-block; padding:0 7px; border-radius:9px;
           font-size:11px; font-weight:600; }
@@ -79,8 +80,8 @@
 
 <main class="split" id="tab-feed-wrap">
 <section class="tab active" data-tabname="feed" id="feedwrap">
-  <h2>Live launches — Pons &amp; Long (auto-refresh)</h2>
-  <label class="detail"><input type="checkbox" id="watchonly"> candidates only (watch / smart money)</label>
+  <h2>Opportunities — ranked, auto-refresh (Pons &amp; Long)</h2>
+  <label class="detail"><input type="checkbox" id="watchonly" checked> candidates only (hide quiet)</label>
   <table id="feed"><tbody></tbody></table>
   <div class="box" id="entrybox"></div>
 </section>
@@ -182,14 +183,15 @@ async function refresh() {
     if (d.last_error) $("#status").textContent += " — error: " + d.last_error;
     const only = $("#watchonly").checked;
     let rows = d.rows;
-    if (only) rows = rows.filter(x => x.cls === "watch" || x.smart > 0);
-    $("#feed tbody").innerHTML = rows.map(x => `<tr>
-      <td class="sym">${esc(x.symbol)}${x.graduated ? ' <span class="grad">GRAD</span>':''}${x.smart ? ' <span class="smarttag">SMART x'+x.smart+'</span>':''}</td>
-      <td class="venue">${esc(x.venue)}</td>
+    if (only) rows = rows.filter(x => x.cls !== "quiet" || x.smart > 0 || x.setup);
+    $("#feed tbody").innerHTML = rows.map((x, i) => `<tr>
+      <td class="rank">#${i+1}<div class="detail">${x.opp ?? 0}</div></td>
+      <td class="sym">${esc(x.symbol)}${x.graduated ? ' <span class="grad">GRAD</span>':''}${x.setup ? ' <span class="grad">SETUP</span>':''}${x.smart ? ' <span class="smarttag">SMART x'+x.smart+'</span>':''}
+          <div class="venue">${esc(x.venue)}</div></td>
       <td><span class="pill ${esc(x.cls)}">${esc(x.cls)}</span></td>
       <td><a class="ca" data-t="${esc(x.token)}" data-p="${esc(x.pair)}"
              data-c="${esc(x.creation_block ?? '')}">${esc(x.token)}</a>
-          <div class="detail">${esc(x.detail)}</div></td></tr>`).join("")
+          <div class="detail">${esc(x.reason)} · ${esc(x.detail)}</div></td></tr>`).join("")
       || '<tr><td class="detail">nothing matches yet</td></tr>';
     const eps = d.entrypoints || [];
     $("#entrybox").style.display = eps.length ? "block" : "none";

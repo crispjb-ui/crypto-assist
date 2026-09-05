@@ -24,9 +24,23 @@ import requests
 
 from . import store
 
-GECKO_BASE = "https://api.geckoterminal.com/api/v2"
 GECKO_NETWORK = os.environ.get("GECKOTERMINAL_NETWORK", "robinhood")
+# A free CoinGecko *demo* API key (get one at coingecko.com/en/api) routes to
+# the pro host with a real quota; without it the public host is throttled hard.
+GECKO_API_KEY = os.environ.get("GECKOTERMINAL_API_KEY", "")
+if GECKO_API_KEY:
+    GECKO_BASE = "https://pro-api.coingecko.com/api/v3/onchain"
+    _GECKO_HEADERS = {"Accept": "application/json", "x-cg-demo-api-key": GECKO_API_KEY}
+else:
+    GECKO_BASE = "https://api.geckoterminal.com/api/v2"
+    _GECKO_HEADERS = {"Accept": "application/json"}
 _session = requests.Session()
+
+# Session caches so repeat sweeps (every 30 min) don't refetch the same data.
+_pools_cache: dict = {"ts": 0.0, "data": None}
+_ohlcv_cache: dict[str, tuple[float, list]] = {}
+_POOLS_TTL = 1800     # 30 min
+_OHLCV_TTL = 21600    # 6 h — daily structure barely moves intraday
 
 # Setup filter defaults (percentages as positive numbers).
 MIN_DRAWDOWN_PCT = 60.0     # peak-to-trough flush depth to qualify
@@ -40,24 +54,28 @@ MIN_AGE_DAYS = 5.0
 # GeckoTerminal's free tier allows ~30 calls/min; 2.5s spacing (24/min) stays
 # under it. This runs as a background job, so slow-but-complete beats fast-but-
 # throttled.
-MIN_CALL_GAP_SECONDS = 3.0
+# Keyless public tier needs wide spacing; a demo key tolerates tighter.
+MIN_CALL_GAP_SECONDS = 1.5 if GECKO_API_KEY else 4.0
 _last_call = 0.0
+_rate_warned = False
 
 
 def _get(path: str, params: dict | None = None):
-    global _last_call
+    global _last_call, _rate_warned
     for attempt in range(3):
         wait = MIN_CALL_GAP_SECONDS - (time.time() - _last_call)
         if wait > 0:
             time.sleep(wait)
         resp = _session.get(f"{GECKO_BASE}{path}", params=params or {},
-                            timeout=30, headers={"Accept": "application/json"})
+                            timeout=30, headers=_GECKO_HEADERS)
         _last_call = time.time()
         if resp.status_code == 429 and attempt < 2:
-            wait_s = 20 * (attempt + 1)
-            print(f"note: GeckoTerminal rate limit — pausing {wait_s}s",
-                  file=sys.stderr)
-            time.sleep(wait_s)
+            if not _rate_warned:
+                print("note: GeckoTerminal rate-limited; backing off. Set a free "
+                      "GECKOTERMINAL_API_KEY in .env to remove this.",
+                      file=sys.stderr)
+                _rate_warned = True
+            time.sleep(20 * (attempt + 1))
             continue
         resp.raise_for_status()
         return resp.json()
@@ -66,7 +84,11 @@ def _get(path: str, params: dict | None = None):
 
 def top_pools(pages: int = 2) -> list[dict]:
     """Highest-volume pools on the network — the setup universe. Established
-    tokens only appear here once they have real volume, which is the point."""
+    tokens only appear here once they have real volume, which is the point.
+    Cached for 30 min so the periodic sweep doesn't re-fetch the universe."""
+    if _pools_cache["data"] is not None and \
+            time.time() - _pools_cache["ts"] < _POOLS_TTL:
+        return _pools_cache["data"]
     pools = []
     for page in range(1, pages + 1):
         try:
@@ -76,17 +98,26 @@ def top_pools(pages: int = 2) -> list[dict]:
                   file=sys.stderr)
             break
         pools.extend(body.get("data") or [])
+    if pools:
+        _pools_cache.update(ts=time.time(), data=pools)
     return pools
 
 
 def daily_ohlcv(pool_address: str, limit: int = 120) -> list[list[float]]:
-    """[[ts, open, high, low, close, volume], ...] ascending by time."""
+    """[[ts, open, high, low, close, volume], ...] ascending by time.
+    Cached per pool for 6h — daily structure barely moves intraday, so a sweep
+    every 30 min mostly hits cache and stays under the rate limit."""
+    cached = _ohlcv_cache.get(pool_address)
+    if cached and time.time() - cached[0] < _OHLCV_TTL:
+        return cached[1]
     body = _get(f"/networks/{GECKO_NETWORK}/pools/{pool_address}/ohlcv/day",
                 {"limit": limit})
     rows = (((body.get("data") or {}).get("attributes") or {})
             .get("ohlcv_list") or [])
-    return sorted(([float(x) for x in r] for r in rows if len(r) >= 6),
-                  key=lambda r: r[0])
+    out = sorted(([float(x) for x in r] for r in rows if len(r) >= 6),
+                 key=lambda r: r[0])
+    _ohlcv_cache[pool_address] = (time.time(), out)
+    return out
 
 
 def structure(ohlcv: list[list[float]]) -> dict | None:
