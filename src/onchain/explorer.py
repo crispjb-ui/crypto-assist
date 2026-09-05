@@ -13,6 +13,16 @@ from . import config
 
 LAST_ERROR: str | None = None   # most recent request failure, for diagnostics
 
+# Explorer hosts behind Cloudflare bot protection 403 the default
+# python-requests User-Agent while serving browsers normally — identify as a
+# browser for this public read-only API.
+_HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+}
+
 
 def _v2_base() -> str | None:
     """Blockscout v2 REST base derived from the configured API URL — modern
@@ -33,8 +43,7 @@ def _get_v2(path: str) -> tuple[int | None, dict | list | None]:
     if not base:
         return None, None
     try:
-        resp = requests.get(base + path, timeout=8,
-                            headers={"Accept": "application/json"})
+        resp = requests.get(base + path, timeout=8, headers=_HEADERS)
         if resp.status_code == 404:
             return 404, None
         resp.raise_for_status()
@@ -75,7 +84,8 @@ def _get(params: dict) -> dict | list | None:
     global LAST_ERROR
     for attempt in range(2):
         try:
-            resp = requests.get(config.EXPLORER_API_URL, params=params, timeout=8)
+            resp = requests.get(config.EXPLORER_API_URL, params=params,
+                                timeout=8, headers=_HEADERS)
             resp.raise_for_status()
             body = resp.json()
             # Etherscan-compat: status "0" with "No transactions found" is a valid empty.
