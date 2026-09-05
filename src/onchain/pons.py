@@ -56,7 +56,14 @@ KNOWN_LAUNCH_ENTRYPOINTS = {
     (V2_FACTORY.lower(), "0xa72101af"),   # factory-direct launch (deployed ABI)
     ("0xe33e9e479df8802cb0866d5d05258bec4cf62948", "0xf85f8e41"),  # dominant router
 }
-KNOWN_SELECTORS = {sel for _, sel in KNOWN_LAUNCH_ENTRYPOINTS}
+# Launch-router selectors observed recurring across many (often throwaway)
+# router contracts. Registered by selector-family so the "unrecognized" noise
+# stays quiet; bundle detection is execution-truth based and selector-agnostic,
+# so nothing depends on decoding these.
+KNOWN_ROUTER_SELECTORS = {
+    "0x3f707e6b", "0xb0da329a", "0x174dea71", "0x84d5b15d",
+}
+KNOWN_SELECTORS = {sel for _, sel in KNOWN_LAUNCH_ENTRYPOINTS} | KNOWN_ROUTER_SELECTORS
 
 
 def is_known_entrypoint(to: str, selector: str) -> bool:
@@ -304,14 +311,18 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
         if i % 10 == 0 or i == len(launches):
             print(f"  analyzed {i}/{len(launches)}", file=sys.stderr)
 
-    for (to, sel), (count, sample) in unknown_entrypoints.items():
-        print(f"note: {count} launch(es) via unrecognized entrypoint {to} "
-              f"selector {sel} (sample tx {sample}) — exemption lists for these "
-              "are heuristic or opaque; report this line to add exact support.",
-              file=sys.stderr)
+    if unknown_entrypoints:
+        # One quiet summary — bundle detection runs on execution truth
+        # (tax-free buyers), so undecoded routers don't affect results.
+        total = sum(c for c, _ in unknown_entrypoints.values())
+        print(f"note: {total} launch(es) via {len(unknown_entrypoints)} novel "
+              "router entrypoint(s); bundle detection unaffected "
+              "(execution-truth based).", file=sys.stderr)
         if entrypoint_sink is not None:
-            entrypoint_sink[f"{to} {sel}"] = {"entrypoint": to, "selector": sel,
-                                              "count": count, "sample_tx": sample}
+            for (to, sel), (count, sample) in unknown_entrypoints.items():
+                entrypoint_sink[f"{to} {sel}"] = {
+                    "entrypoint": to, "selector": sel,
+                    "count": count, "sample_tx": sample}
     return launches
 
 

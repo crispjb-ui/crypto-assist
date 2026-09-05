@@ -40,7 +40,7 @@ MIN_AGE_DAYS = 5.0
 # GeckoTerminal's free tier allows ~30 calls/min; 2.5s spacing (24/min) stays
 # under it. This runs as a background job, so slow-but-complete beats fast-but-
 # throttled.
-MIN_CALL_GAP_SECONDS = 2.5
+MIN_CALL_GAP_SECONDS = 3.0
 _last_call = 0.0
 
 
@@ -117,8 +117,12 @@ def scan(min_drawdown: float = MIN_DRAWDOWN_PCT,
          limit: int = 40, pages: int = 2) -> list[dict]:
     results = []
     pools = top_pools(pages)
-    print(f"screening {len(pools)} pools on '{GECKO_NETWORK}'...", file=sys.stderr)
-    for i, pool in enumerate(pools[: limit * 3], 1):
+    # Cap the OHLCV fetches (one call each) to keep total GeckoTerminal volume
+    # under the free-tier limit; the top pools by volume are where runners live.
+    universe = pools[: min(len(pools), max(limit * 2, 30))]
+    print(f"screening {len(universe)} of {len(pools)} pools on "
+          f"'{GECKO_NETWORK}'...", file=sys.stderr)
+    for i, pool in enumerate(universe, 1):
         attrs = pool.get("attributes") or {}
         addr = attrs.get("address") or (pool.get("id") or "").split("_")[-1]
         liq = float(attrs.get("reserve_in_usd") or 0)
