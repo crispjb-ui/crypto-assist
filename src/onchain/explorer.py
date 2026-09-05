@@ -86,6 +86,11 @@ def _get(params: dict) -> dict | list | None:
         try:
             resp = requests.get(config.EXPLORER_API_URL, params=params,
                                 timeout=8, headers=_HEADERS)
+            if 400 <= resp.status_code < 500:
+                # 4xx is a policy answer, not a transient fault — no retry
+                LAST_ERROR = (f"HTTP {resp.status_code} for "
+                              f"{params.get('module')}/{params.get('action')}")
+                return None
             resp.raise_for_status()
             body = resp.json()
             # Etherscan-compat: status "0" with "No transactions found" is a valid empty.
@@ -149,6 +154,15 @@ def funding_event(address: str) -> dict | None:
                     first_ext_is_funding = True
         except (ValueError, AttributeError):
             continue
+    if ext is None:
+        # legacy txlist API unavailable — v2 REST fallback (fresh launch
+        # wallets have shallow history, which is exactly what v2 can serve)
+        c_ext, e_ext = _v2_earliest_inbound(addr, "transactions")
+        c_int, e_int = _v2_earliest_inbound(addr, "internal-transactions")
+        cands = [e for e in (e_ext, e_int) if e]
+        if cands:
+            return min(cands, key=lambda c: c["block"])
+        return None if (c_ext and c_int) else None
     if not first_ext_is_funding:
         for tx in internal_transactions(address, limit=10) or []:
             try:
@@ -184,6 +198,87 @@ def token_holder_list(contract: str, offset: int = 500) -> list[dict] | None:
             rows.append({"TokenHolderAddress": str(addr),
                          "TokenHolderQuantity": str(val)})
     return rows or None
+
+
+def token_holder_snapshot(contract: str) -> dict | None:
+    """Holder page PLUS the population truth needed to use it honestly:
+    {"rows": [...], "holder_count": int|None, "total_supply": int|None,
+     "complete": bool}. A single page of ~50 holders is NOT the holder set —
+    treating it as one inflates concentration and fires false low-holder
+    flags, so callers get the real count (v2 /tokens/{hash}) alongside."""
+    result = _get({"module": "token", "action": "tokenholderlist",
+                   "contractaddress": contract, "page": 1, "offset": 500})
+    if isinstance(result, list) and result:
+        return {"rows": result, "holder_count": None, "total_supply": None,
+                "complete": len(result) < 500}
+    status, body = _get_v2(f"/tokens/{contract}/holders")
+    items = (body or {}).get("items") if isinstance(body, dict) else None
+    if not items:
+        return None
+    rows = []
+    for it in items:
+        addr = ((it.get("address") or {}).get("hash")
+                if isinstance(it.get("address"), dict) else it.get("address"))
+        val = it.get("value")
+        if addr and val is not None:
+            rows.append({"TokenHolderAddress": str(addr),
+                         "TokenHolderQuantity": str(val)})
+    if not rows:
+        return None
+    snap = {"rows": rows, "holder_count": None, "total_supply": None,
+            "complete": not (body or {}).get("next_page_params")}
+    t_status, t_body = _get_v2(f"/tokens/{contract}")
+    if t_status == 200 and isinstance(t_body, dict):
+        for key in ("holders", "holders_count"):
+            try:
+                snap["holder_count"] = int(t_body.get(key))
+                break
+            except (TypeError, ValueError):
+                continue
+        try:
+            snap["total_supply"] = int(t_body.get("total_supply"))
+        except (TypeError, ValueError):
+            pass
+    return snap
+
+
+def _v2_earliest_inbound(addr: str, kind: str) -> tuple[bool, dict | None]:
+    """(complete, earliest inbound value-transfer) from Blockscout v2 address
+    history. v2 pages newest-first, so 'earliest' is only trustworthy when we
+    reach the final page; wallets with deep history return (False, None)
+    rather than a wrong 'first funder'. Early launch buyers are typically
+    fresh wallets with a page or less, which is the case that matters."""
+    from urllib.parse import urlencode
+    items: list[dict] = []
+    query = ""
+    for _ in range(3):
+        status, body = _get_v2(f"/addresses/{addr}/{kind}{query}")
+        if status != 200 or not isinstance(body, dict):
+            return False, None
+        items.extend(body.get("items") or [])
+        nxt = body.get("next_page_params")
+        if not nxt:
+            break
+        query = "?" + urlencode(nxt)
+    else:
+        return False, None   # never reached the oldest page
+    best = None
+    a = addr.lower()
+    internal = kind != "transactions"
+    for it in items:
+        try:
+            to = ((it.get("to") or {}).get("hash") or "").lower()
+            if to != a or int(it.get("value") or 0) <= 0:
+                continue
+            blk = int(it.get("block_number") or it.get("block") or 0)
+            cand = {"from": ((it.get("from") or {}).get("hash") or "").lower(),
+                    "hash": it.get("transaction_hash") or it.get("hash"),
+                    "internal": internal, "block": blk}
+            if best is None or cand["block"] < best["block"]:
+                best = cand
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return True, best
 
 
 _creation_cache: dict[str, str | None] = {}

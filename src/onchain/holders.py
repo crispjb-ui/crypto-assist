@@ -50,14 +50,16 @@ def _stats_from_balances(balances: dict[str, int], exclude: set[str],
 
 def _stats_from_explorer(token: str, exclude: set[str],
                          top_n: int) -> HolderStats | None:
-    """One explorer call instead of full Transfer replay. Handles both
-    Etherscan-style and Blockscout-style row keys; any parse doubt → None
-    (fall back to replay), never a wrong number."""
-    rows = explorer.token_holder_list(token)
-    if not rows:
+    """Explorer holder snapshot instead of full Transfer replay. A partial
+    page is used ONLY when the true holder count and total supply are known,
+    so concentration is computed against the real population — a top-50 page
+    treated as the whole holder set inflates top-10% and fires false
+    low-holder flags. Any doubt → None (fall back to replay)."""
+    snap = explorer.token_holder_snapshot(token)
+    if not snap or not snap.get("rows"):
         return None
     balances: dict[str, int] = {}
-    for r in rows:
+    for r in snap["rows"]:
         addr = str(r.get("TokenHolderAddress") or r.get("address") or "").lower()
         qty = r.get("TokenHolderQuantity") or r.get("value")
         if not (addr.startswith("0x") and len(addr) == 42):
@@ -66,8 +68,36 @@ def _stats_from_explorer(token: str, exclude: set[str],
             balances[addr] = balances.get(addr, 0) + int(str(qty))
         except (TypeError, ValueError):
             return None
-    # scanned_from_block = -1 marks explorer-sourced (top-N page, not a replay)
-    return _stats_from_balances(balances, exclude, top_n, scanned_from_block=-1)
+
+    if snap.get("complete"):
+        # the page IS the full holder set — exact math
+        return _stats_from_balances(balances, exclude, top_n,
+                                    scanned_from_block=-1)
+
+    total = snap.get("total_supply")
+    known_count = snap.get("holder_count")
+    if not total or not known_count:
+        return None   # partial page with unknown population → replay instead
+
+    burned_held = balances.get(DEAD, 0) + max(balances.get(ZERO, 0), 0)
+    excluded_held = sum(b for a, b in balances.items() if a in exclude)
+    circulating = max(total - burned_held - excluded_held, 1)
+    page_held = {a: b for a, b in balances.items()
+                 if b > 0 and a not in (ZERO, DEAD) and a not in exclude}
+    special_on_page = sum(1 for a in balances
+                          if a in (ZERO, DEAD) or a in exclude)
+    stats = HolderStats(
+        holder_count=max(known_count - special_on_page, len(page_held)),
+        circulating=circulating,
+        scanned_from_block=-1,
+    )
+    stats.burned_pct = 100.0 * burned_held / max(total, 1)
+    ranked = sorted(page_held.items(), key=lambda kv: -kv[1])
+    stats.top_holders = [(a, b, 100.0 * b / circulating)
+                         for a, b in ranked[:top_n]]
+    stats.top10_pct = sum(p for _, _, p in stats.top_holders[:10])
+    stats.top20_pct = sum(p for _, _, p in stats.top_holders[:20])
+    return stats
 
 
 def holder_stats(rpc: EvmRpc, token: str, deploy_block: int,
