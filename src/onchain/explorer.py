@@ -13,6 +13,14 @@ from . import config
 
 LAST_ERROR: str | None = None   # most recent request failure, for diagnostics
 
+
+def _sanitize(text: str) -> str:
+    """Never let the API key ride along in an error message — errors surface
+    in the dashboard header and end up in screenshots."""
+    if config.EXPLORER_API_KEY:
+        text = text.replace(config.EXPLORER_API_KEY, "<apikey>")
+    return text
+
 # Be a polite client of a free public API, and fail FAST when it is unhappy:
 # a global min-gap between calls, and a circuit breaker that opens after
 # repeated transport failures so scans report "explorer unavailable" in
@@ -97,7 +105,7 @@ def _get_v2(path: str) -> tuple[int | None, dict | list | None]:
         _record(True)
         return resp.status_code, resp.json()
     except (requests.RequestException, ValueError) as exc:
-        LAST_ERROR = f"{type(exc).__name__}: {str(exc)[:160]}"
+        LAST_ERROR = _sanitize(f"{type(exc).__name__}: {str(exc)[:200]}")
         _record(False)
         return None, None
 
@@ -152,7 +160,7 @@ def _get(params: dict) -> dict | list | None:
             _record(True)
             return result
         except (requests.RequestException, ValueError) as exc:
-            LAST_ERROR = f"{type(exc).__name__}: {str(exc)[:160]}"
+            LAST_ERROR = _sanitize(f"{type(exc).__name__}: {str(exc)[:200]}")
             if attempt >= 1:      # final attempt: fail fast, no pointless sleep
                 _record(False)
                 return None
