@@ -1,0 +1,33 @@
+{
+  "manifest_id": "example-token-diligence",
+  "target": { "chain_id": 4663, "address": "0xabababababababababababababababababababab" },
+  "metadata": {
+    "name": "Example", "symbol": "EXMPL", "decimals": 18,
+    "total_supply": "1000000000",
+    "unresolved": []
+  },
+  "pins": [
+    { "chain_id": 4663, "block": 55176567,
+      "hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "utc": "2026-09-05T14:01:55Z" }
+  ],
+  "scope_addresses": [
+    { "address": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "chain_id": 4663,
+      "role": "launch factory", "provenance": "deployed-runtime",
+      "runtime_status": "contract" }
+  ],
+  "report": {
+    "reported_chain_id": 4663,
+    "reported_address": "0xabababababababababababababababababababab",
+    "source_manifest_id": "example-token-diligence"
+  },
+  "declarations": { "no_real_signing": true, "no_broadcast": true, "fork_writes_only": true },
+  "checks": [
+    { "id": "A1", "proposition": "no mint path in deployed runtime at pin",
+      "result": "pass", "evidence": "eth_getCode@pin selector scan; no mint selector" },
+    { "id": "B1", "proposition": "canonical LP position locked in locker at pin",
+      "result": "pass", "evidence": "position NFT owner == locker; no live withdraw path" },
+    { "id": "C1", "proposition": "holder-sized sell realizes on fork",
+      "result": "unknown", "evidence": "" }
+  ]
+}
