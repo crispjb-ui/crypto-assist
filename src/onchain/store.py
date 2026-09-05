@@ -67,15 +67,16 @@ def mark_wallet_scan(token: str) -> None:
 
 
 def upsert_wallet_trade(wallet: str, token: str, spent: float,
-                        received: float, trades: int) -> None:
+                        received: float, trades: int,
+                        quote_symbol: str = "ETH") -> None:
     with connect() as conn:
         conn.execute(
-            "INSERT INTO wallet_trades (wallet, token, spent, received, trades, last_ts) "
-            "VALUES (?,?,?,?,?,strftime('%s','now')) "
+            "INSERT INTO wallet_trades (wallet, token, spent, received, trades, "
+            "last_ts, quote_symbol) VALUES (?,?,?,?,?,strftime('%s','now'),?) "
             "ON CONFLICT(wallet, token) DO UPDATE SET "
             "spent = spent + excluded.spent, received = received + excluded.received, "
             "trades = trades + excluded.trades, last_ts = excluded.last_ts",
-            (wallet.lower(), token.lower(), spent, received, trades),
+            (wallet.lower(), token.lower(), spent, received, trades, quote_symbol),
         )
 
 
@@ -83,6 +84,13 @@ def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(_SCHEMA)
+    # migration: Long trades realize PnL in stock tokens, not ETH — totals are
+    # only meaningful per quote currency.
+    try:
+        conn.execute("ALTER TABLE wallet_trades ADD COLUMN "
+                     "quote_symbol TEXT NOT NULL DEFAULT 'ETH'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return conn
 
 
