@@ -69,13 +69,19 @@ def evaluate(token: TokenInfo, launch: LaunchWindow | None,
                      f"({len(clusters.funding_clusters)} funding cluster(s) total)", "funding-cluster")
         elif not clusters.funding_traced:
             from . import config as _cfg, explorer as _ex
-            v.notes.append(
-                (f"funding sources NOT traced — explorer calls failed "
-                 f"({_ex.LAST_ERROR or 'unknown error'}); disperser/common-"
-                 "funder detection is blind for this scan"
-                 if _cfg.EXPLORER_API_URL else
-                 "funding sources not traced (no explorer API configured)")
-                + " — fresh-wallet nonce is the fallback signal")
+            if not clusters.profiles:
+                v.notes.append("no early buyers in the launch window — nothing "
+                               "to funding-trace (quiet launch or established "
+                               "token)")
+            else:
+                v.notes.append(
+                    (f"funding sources NOT traced for "
+                     f"{len(clusters.profiles)} early buyer(s) — explorer "
+                     f"calls failed ({_ex.LAST_ERROR or 'no data returned'}); "
+                     "disperser/common-funder detection is blind for this scan"
+                     if _cfg.EXPLORER_API_URL else
+                     "funding sources not traced (no explorer API configured)")
+                    + " — fresh-wallet nonce is the fallback signal")
         if clusters.fresh_wallet_count / n >= 0.5:
             v.add(2, f"{clusters.fresh_wallet_count}/{n} early buyers were fresh wallets "
                      "(nonce ≤ 3 at launch)", "fresh-wallets")
