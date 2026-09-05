@@ -11,7 +11,7 @@ Primary target: **Robinhood Chain** (EVM, Arbitrum Orbit stack, mainnet since Ju
 | Chain ID | `4663` |
 | Public RPC (rate-limited) | `https://rpc.mainnet.chain.robinhood.com` |
 | Paid RPC | dRPC serves Robinhood Chain — use your dashboard endpoint |
-| Explorer (Blockscout) | `https://robinhoodchain.blockscout.com` (API at `/api`) |
+| Explorer API | Blockscout hosted gateway `https://api.blockscout.com/4663/api` + free key from dev.blockscout.com (the chain's public instance is unreliable) |
 | DexScreener slug | `robinhood` (dexscreener.com/robinhood) |
 | Pons V1 factory | `0xA5aAb3F0c6EeadF30Ef1D3Eb997108E976351feB` |
 | Pons V2 factory | `0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e` |
