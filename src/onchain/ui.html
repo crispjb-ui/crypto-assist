@@ -13,20 +13,24 @@
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--text);
          font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
-  header { padding:14px 20px; border-bottom:1px solid var(--line);
-           display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
-  header h1 { font-size:16px; margin:0; }
-  #status { color:var(--dim); font-size:12px; }
-  main { display:grid; grid-template-columns:minmax(430px,1.2fr) 1fr;
-         gap:0; min-height:calc(100vh - 55px); }
-  @media (max-width:980px){ main{ grid-template-columns:1fr; } }
-  section { padding:16px 20px; }
+  header { padding:12px 20px; border-bottom:1px solid var(--line);
+           display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 10px 0 0; }
+  nav button { background:none; border:1px solid var(--line); color:var(--dim);
+               padding:5px 14px; border-radius:6px; font:inherit; cursor:pointer; }
+  nav button.active { color:var(--text); border-color:var(--accent); }
+  #status { color:var(--dim); font-size:12px; margin-left:auto; }
+  section.tab { display:none; padding:16px 20px; }
+  section.tab.active { display:block; }
+  main.split { display:grid; grid-template-columns:minmax(430px,1.2fr) 1fr; }
+  @media (max-width:980px){ main.split{ grid-template-columns:1fr; } }
   #feedwrap { border-right:1px solid var(--line); }
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em;
        color:var(--dim); margin:0 0 10px; }
   table { width:100%; border-collapse:collapse; font-size:12.5px; }
-  td { padding:5px 8px 5px 0; border-bottom:1px solid var(--line);
-       vertical-align:top; word-break:break-all; }
+  td, th { padding:5px 8px 5px 0; border-bottom:1px solid var(--line);
+       vertical-align:top; word-break:break-all; text-align:left; }
+  th { color:var(--dim); font-weight:600; font-size:11px; }
   .sym { font-weight:600; white-space:nowrap; }
   .venue { color:var(--dim); white-space:nowrap; }
   .pill { display:inline-block; padding:0 7px; border-radius:9px;
@@ -34,85 +38,215 @@
   .bad   { background:rgba(248,81,73,.15); color:var(--bad); }
   .watch { background:rgba(210,153,34,.15); color:var(--watch); }
   .quiet { background:rgba(72,79,88,.25);  color:var(--dim); }
-  .grad  { color:var(--good); font-size:11px; font-weight:600; }
+  .grad, .smarttag  { color:var(--good); font-size:11px; font-weight:600; }
   .detail { color:var(--dim); font-size:11.5px; }
   .ca { color:var(--accent); cursor:pointer; text-decoration:none; }
   .ca:hover { text-decoration:underline; }
-  form { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+  form.scan { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
   input { background:var(--panel); border:1px solid var(--line);
-          color:var(--text); padding:8px 10px; border-radius:6px;
-          font:inherit; }
-  #token { flex:1 1 340px; } #pair { flex:1 1 240px; }
-  button { background:#238636; color:#fff; border:0; border-radius:6px;
+          color:var(--text); padding:8px 10px; border-radius:6px; font:inherit; }
+  #token { flex:1 1 320px; } #pair { flex:1 1 220px; }
+  button.action { background:#238636; color:#fff; border:0; border-radius:6px;
            padding:8px 16px; font:inherit; font-weight:600; cursor:pointer; }
-  button:disabled { opacity:.5; cursor:wait; }
-  #result { background:var(--panel); border:1px solid var(--line);
-            border-radius:8px; padding:14px; min-height:120px;
-            white-space:pre-wrap; font-size:12.5px; }
+  button.action:disabled { opacity:.5; cursor:wait; }
+  button.job { background:var(--panel); color:var(--text);
+               border:1px solid var(--line); border-radius:6px;
+               padding:6px 12px; font:inherit; cursor:pointer; }
+  #result, .box { background:var(--panel); border:1px solid var(--line);
+            border-radius:8px; padding:14px; white-space:pre-wrap;
+            font-size:12.5px; }
+  #result { min-height:120px; }
   .score-bad{color:var(--bad);font-weight:700} .score-mid{color:var(--watch);font-weight:700}
   .score-ok{color:var(--good);font-weight:700}
   .flag { color:var(--bad); } .note { color:var(--dim); }
   .disclaimer { color:var(--dim); font-size:11px; margin-top:10px; }
+  .jobrow { color:var(--dim); font-size:11.5px; margin-top:6px; }
+  #entrybox { margin-top:12px; border-color:var(--watch); display:none; }
 </style>
 </head>
 <body>
 <header>
   <h1>crypto-assist</h1>
+  <nav>
+    <button data-tab="feed" class="active">Feed</button>
+    <button data-tab="setups">Setups</button>
+    <button data-tab="wallets">Wallets</button>
+    <button data-tab="calibration">Calibration</button>
+  </nav>
   <span id="status">connecting…</span>
 </header>
-<main>
-  <section id="feedwrap">
-    <h2>Live launches — Pons &amp; Long (auto-refresh)</h2>
-    <table id="feed"><tbody></tbody></table>
-  </section>
-  <section>
-    <h2>Quick scan — paste a CA</h2>
-    <form id="scanform">
-      <input id="token" placeholder="0x… token address" autocomplete="off" spellcheck="false">
-      <input id="pair" placeholder="pair/curve (optional)" autocomplete="off" spellcheck="false">
-      <button id="go" type="submit">Scan</button>
-    </form>
-    <div id="result">Paste a contract address, or click one in the feed.
-Full pipeline: contract flags, launch window, clusters, holders. Takes 10–60s.</div>
-    <p class="disclaimer">Detects rigged launches; a low score is not a buy
-signal and nothing here vets team, product, or durability. Feed classes:
-<span class="pill bad">bad</span> insider snipe/offload measured &nbsp;
-<span class="pill watch">watch</span> organic demand, no insiders seen &nbsp;
-<span class="pill quiet">quiet</span> no activity measured.</p>
-  </section>
+
+<main class="split" id="tab-feed-wrap">
+<section class="tab active" data-tabname="feed" id="feedwrap">
+  <h2>Live launches — Pons &amp; Long (auto-refresh)</h2>
+  <label class="detail"><input type="checkbox" id="watchonly"> candidates only (watch / smart money)</label>
+  <table id="feed"><tbody></tbody></table>
+  <div class="box" id="entrybox"></div>
+</section>
+<section class="tab active" data-tabname="feed">
+  <h2>Quick scan — paste a CA</h2>
+  <form class="scan" id="scanform">
+    <input id="token" placeholder="0x… token address" autocomplete="off" spellcheck="false">
+    <input id="pair" placeholder="pair/curve (optional)" autocomplete="off" spellcheck="false">
+    <button class="action" id="go" type="submit">Scan</button>
+  </form>
+  <div id="result">Paste a contract address, or click one anywhere in the app.
+Full pipeline: contract flags, launch window, clusters, holders. 10–60s.</div>
+  <h2 style="margin-top:16px">Maintenance</h2>
+  <div>
+    <button class="job" data-job="wallets_scan">Ingest wallet PnL (24h)</button>
+    <button class="job" data-job="outcomes_update">Label outcomes now</button>
+    <button class="job" data-job="setups_scan">Scan accumulation setups</button>
+  </div>
+  <div class="jobrow" id="jobs"></div>
+  <p class="disclaimer">Detects rigged launches and measured structure; a low
+score or a matching setup is not a buy signal. Classes:
+<span class="pill bad">bad</span> insider snipe/offload &nbsp;
+<span class="pill watch">watch</span> organic demand or smart money &nbsp;
+<span class="pill quiet">quiet</span> nothing measured.</p>
+</section>
 </main>
+
+<section class="tab" data-tabname="setups">
+  <h2>Accumulation setups — rally → flush ≥60% → early recovery, ledger-clean</h2>
+  <p class="detail">Run from Maintenance ("Scan accumulation setups") or wait for
+the next run. Click a token to deep-scan it in the Feed tab. Structure + clean
+ledger ≠ supply migrated to strong hands — run the deep scan and read holders.</p>
+  <table id="setups"><tbody></tbody></table>
+</section>
+
+<section class="tab" data-tabname="wallets">
+  <h2>Smart-wallet leaderboard — realized PnL measured on-chain, per quote</h2>
+  <table id="wallets"><tbody></tbody></table>
+</section>
+
+<section class="tab" data-tabname="calibration">
+  <h2>Detector calibration — per-flag precision vs real outcomes</h2>
+  <div class="box" id="stats">loading…</div>
+</section>
+
 <script>
 const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
 const esc = t => String(t ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+$$("nav button").forEach(b => b.onclick = () => {
+  $$("nav button").forEach(x => x.classList.toggle("active", x === b));
+  const t = b.dataset.tab;
+  $("#tab-feed-wrap").style.display = t === "feed" ? "" : "none";
+  $$("section.tab").forEach(s =>
+    s.classList.toggle("active", s.dataset.tabname === t));
+  if (t === "wallets") loadWallets();
+  if (t === "calibration") loadStats();
+  if (t === "setups") loadSetups();
+});
+
 async function refresh() {
   try {
-    const r = await fetch("/api/feed");
-    const d = await r.json();
+    const d = await (await fetch("/api/feed")).json();
     $("#status").textContent = d.scanning ? "scanning…" :
       d.last_scan ? "last scan " + new Date(d.last_scan*1000).toLocaleTimeString()
                   : "waiting for first scan…";
     if (d.last_error) $("#status").textContent += " — error: " + d.last_error;
-    const rows = d.rows.map(x => `<tr>
-      <td class="sym">${esc(x.symbol)}${x.graduated ? ' <span class="grad">GRAD</span>':''}</td>
+    const only = $("#watchonly").checked;
+    let rows = d.rows;
+    if (only) rows = rows.filter(x => x.cls === "watch" || x.smart > 0);
+    $("#feed tbody").innerHTML = rows.map(x => `<tr>
+      <td class="sym">${esc(x.symbol)}${x.graduated ? ' <span class="grad">GRAD</span>':''}${x.smart ? ' <span class="smarttag">SMART x'+x.smart+'</span>':''}</td>
       <td class="venue">${esc(x.venue)}</td>
       <td><span class="pill ${esc(x.cls)}">${esc(x.cls)}</span></td>
       <td><a class="ca" data-t="${esc(x.token)}" data-p="${esc(x.pair)}"
              data-c="${esc(x.creation_block ?? '')}">${esc(x.token)}</a>
-          <div class="detail">${esc(x.detail)}</div></td>
-    </tr>`).join("");
-    $("#feed tbody").innerHTML = rows ||
-      '<tr><td class="detail">no launches in the window yet</td></tr>';
+          <div class="detail">${esc(x.detail)}</div></td></tr>`).join("")
+      || '<tr><td class="detail">nothing matches yet</td></tr>';
+    const eps = d.entrypoints || [];
+    $("#entrybox").style.display = eps.length ? "block" : "none";
+    if (eps.length) $("#entrybox").textContent =
+      "Unrecognized launch entrypoint(s) — copy this to Claude to add exact " +
+      "bundle decoding:\n" + eps.map(e =>
+        `${e.entrypoint} selector ${e.selector} (${e.count} launches, sample tx ${e.sample_tx})`).join("\n");
+    const jobs = d.jobs || {};
+    $("#jobs").textContent = Object.entries(jobs).map(([n, j]) =>
+      `${n}: ${j.status}${j.error ? " — " + j.error : ""}`).join("   ");
   } catch (e) { $("#status").textContent = "dashboard unreachable: " + e; }
 }
-document.addEventListener("click", e => {
+
+async function loadSetups() {
+  const d = await (await fetch("/api/setups")).json();
+  const rows = d.rows || [];
+  $("#setups tbody").innerHTML =
+    `<tr><th>symbol</th><th>drawdown</th><th>recovery</th><th>vs ATH</th>
+     <th>liq $</th><th>score</th><th>token</th></tr>` +
+    (rows.map(r => `<tr>
+      <td class="sym">${esc(r.symbol)}</td>
+      <td>-${esc(r.drawdown_pct)}%</td><td>+${esc(r.recovery_pct)}%</td>
+      <td>${esc(r.current_vs_ath)}</td>
+      <td>${Number(r.liquidity_usd).toLocaleString()}</td>
+      <td>${r.diligence_score ?? "—"}</td>
+      <td><a class="ca" data-t="${esc(r.token || '')}">${esc(r.token || r.pool)}</a></td>
+    </tr>`).join("") ||
+    `<tr><td class="detail" colspan="7">no scan yet, or no setups matched
+     (${d.ts ? "last run " + new Date(d.ts*1000).toLocaleString() : "never run"}) —
+     rare by definition</td></tr>`);
+}
+
+async function loadWallets() {
+  const d = await (await fetch("/api/wallets")).json();
+  const rows = d.rows || [];
+  $("#wallets tbody").innerHTML =
+    `<tr><th>wallet</th><th>tokens</th><th>wins</th><th>win rate</th>
+     <th>realized</th><th></th></tr>` +
+    (rows.map(r => `<tr>
+      <td>${esc(r.wallet)}</td><td>${r.tokens}</td><td>${r.wins}</td>
+      <td>${Math.round(r.win_rate*100)}%</td>
+      <td>${esc(Object.entries(r.realized_by_quote || {})
+            .map(([q,v]) => (v>=0?"+":"") + v.toFixed(3) + " " + q).join(", "))}</td>
+      <td>${r.smart ? '<span class="smarttag">SMART</span>' : ""}</td>
+    </tr>`).join("") ||
+    '<tr><td class="detail" colspan="6">no wallet data yet — run "Ingest wallet PnL"</td></tr>');
+}
+
+async function loadStats() {
+  const d = await (await fetch("/api/stats")).json();
+  if (!d.labeled) {
+    $("#stats").textContent = "No labeled outcomes yet. Deep-scan tokens today, " +
+      'press "Label outcomes now" tomorrow, and precision appears here.';
+    return;
+  }
+  let h = `labeled runs: ${d.labeled}  (went bad: ${d.bad}, alive: ${d.alive})\n\n`;
+  h += "flag".padEnd(34) + "fired  bad  alive  precision\n";
+  for (const f of d.flags)
+    h += `${esc(f.flag).padEnd(34)}${String(f.fired).padStart(5)}${String(f.bad).padStart(5)}`
+       + `${String(f.alive).padStart(7)}${(f.precision*100).toFixed(0).padStart(10)}%\n`;
+  h += d.misses.length
+    ? `\nMISSES (went bad but scored clean — detector gaps):\n` +
+      d.misses.map(m => `  ${esc(m.token)}  scored ${m.score} → ${esc(m.status)}`).join("\n") +
+      `\n\nRun /improve-detectors in Claude Code to act on this.`
+    : "\nNo misses among labeled runs.";
+  $("#stats").innerHTML = h;
+}
+
+document.addEventListener("click", async e => {
   const a = e.target.closest(".ca");
-  if (!a) return;
-  $("#token").value = a.dataset.t; $("#pair").value = a.dataset.p || "";
-  $("#scanform").dataset.creationBlock = a.dataset.c || "";
-  $("#scanform").requestSubmit();
+  if (a) {
+    $$("nav button")[0].click();
+    $("#token").value = a.dataset.t || ""; $("#pair").value = a.dataset.p || "";
+    $("#scanform").dataset.creationBlock = a.dataset.c || "";
+    if (a.dataset.t) $("#scanform").requestSubmit();
+    return;
+  }
+  const j = e.target.closest("button.job");
+  if (j) {
+    j.disabled = true;
+    try { await fetch("/api/job", { method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ name: j.dataset.job }) }); }
+    finally { setTimeout(() => j.disabled = false, 2000); refresh(); }
+  }
 });
+
+$("#watchonly").addEventListener("change", refresh);
 $("#scanform").addEventListener("submit", async e => {
   e.preventDefault();
   const btn = $("#go"); btn.disabled = true;
@@ -129,6 +263,7 @@ $("#scanform").addEventListener("submit", async e => {
   } catch (err) { $("#result").textContent = "request failed: " + err; }
   finally { btn.disabled = false; $("#scanform").dataset.creationBlock = ""; }
 });
+
 function render(d) {
   const v = d.verdict, cls = v.score >= 5 ? "score-bad" : v.score >= 2 ? "score-mid" : "score-ok";
   const liq = d.market?.liquidity?.usd;

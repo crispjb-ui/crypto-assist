@@ -177,7 +177,8 @@ def snipe_window_activity(rpc: EvmRpc, launch: PonsLaunch,
 
 def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
                     deep: bool = True, limit: int = 200,
-                    snipe_window_blocks: int = 300) -> list[PonsLaunch]:
+                    snipe_window_blocks: int = 300,
+                    entrypoint_sink: dict | None = None) -> list[PonsLaunch]:
     launches: list[PonsLaunch] = []
 
     for log in rpc.get_logs(from_block, to_block, address=V2_FACTORY,
@@ -245,6 +246,9 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
               f"selector {sel} (sample tx {sample}) — exemption lists for these "
               "are heuristic or opaque; report this line to add exact support.",
               file=sys.stderr)
+        if entrypoint_sink is not None:
+            entrypoint_sink[f"{to} {sel}"] = {"entrypoint": to, "selector": sel,
+                                              "count": count, "sample_tx": sample}
     return launches
 
 

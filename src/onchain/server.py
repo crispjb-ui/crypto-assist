@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import long as long_mod
-from . import pons, report, wallets
+from . import outcomes, pons, report, setups, wallets
 from .pons import block_near_time
 from .rpc import EvmRpc
 
@@ -36,7 +36,46 @@ state = {
     "last_scan": None,
     "last_error": None,
     "scanning": False,
+    "entrypoints": {},   # unrecognized Pons launch entrypoints (for exact support)
+    "jobs": {},          # name -> {status, started, finished, error, result}
+    "setups": {"rows": [], "ts": None},
 }
+
+def _setups_job() -> None:
+    rows = setups.scan()
+    with state["lock"]:
+        state["setups"] = {"rows": rows, "ts": int(time.time())}
+
+
+JOBS = {
+    "wallets_scan": ("Ingest wallet PnL (24h)",
+                     lambda: wallets.scan(hours=24, limit=150)),
+    "outcomes_update": ("Label outcomes now",
+                        lambda: outcomes.cmd_update(min_age_hours=20.0)),
+    "setups_scan": ("Scan accumulation setups", _setups_job),
+}
+
+
+def _run_job(name: str) -> None:
+    fn = JOBS[name][1]
+    job = state["jobs"][name]
+    try:
+        fn()
+        job.update(status="done", finished=int(time.time()))
+    except Exception as exc:
+        traceback.print_exc()
+        job.update(status="failed", finished=int(time.time()), error=str(exc))
+
+
+def start_job(name: str) -> dict:
+    with state["lock"]:
+        job = state["jobs"].get(name)
+        if job and job.get("status") == "running":
+            return {"error": f"{name} is already running"}
+        state["jobs"][name] = {"status": "running", "started": int(time.time()),
+                               "finished": None, "error": None}
+    threading.Thread(target=_run_job, args=(name,), daemon=True).start()
+    return {"started": name}
 
 
 def classify_pons(l) -> str:
@@ -67,9 +106,11 @@ def scan_once() -> None:
     except Exception:
         smart = set()
 
+    entrypoints: dict = {}
     rows: dict[str, dict] = {}
     for l in pons.recent_launches(rpc, from_block, to_block, deep=True,
-                                  limit=60, snipe_window_blocks=snipe_window):
+                                  limit=60, snipe_window_blocks=snipe_window,
+                                  entrypoint_sink=entrypoints):
         smart_hits = smart.intersection(l.snipe_buyers)
         cls = classify_pons(l)
         if smart_hits and cls == "quiet":
@@ -106,11 +147,16 @@ def scan_once() -> None:
         state["feed"].update(rows)
         trimmed = sorted(state["feed"].values(), key=lambda r: -r["block"])
         state["feed"] = {r["token"]: r for r in trimmed[:FEED_CACHE_MAX]}
+        state["entrypoints"].update(entrypoints)
         state["last_scan"] = int(time.time())
         state["last_error"] = None
 
 
+SETUPS_INTERVAL_SECONDS = 1800  # self-identifying setup sweep, every 30 min
+
+
 def scanner_loop() -> None:
+    last_setups = 0.0
     while True:
         state["scanning"] = True
         try:
@@ -119,6 +165,12 @@ def scanner_loop() -> None:
             traceback.print_exc()
             with state["lock"]:
                 state["last_error"] = str(exc)
+        if time.time() - last_setups >= SETUPS_INTERVAL_SECONDS:
+            try:
+                _setups_job()
+            except Exception:
+                traceback.print_exc()
+            last_setups = time.time()
         state["scanning"] = False
         time.sleep(SCAN_INTERVAL_SECONDS)
 
@@ -146,11 +198,42 @@ class Handler(BaseHTTPRequestHandler):
                 rows = sorted(state["feed"].values(), key=lambda r: -r["block"])
                 self._json(200, {"rows": rows, "last_scan": state["last_scan"],
                                  "scanning": state["scanning"],
-                                 "last_error": state["last_error"]})
+                                 "last_error": state["last_error"],
+                                 "entrypoints": list(state["entrypoints"].values()),
+                                 "jobs": state["jobs"]})
+        elif self.path.startswith("/api/wallets"):
+            try:
+                board = wallets.leaderboard(min_tokens=1)
+                smart = wallets.smart_set()
+                for e in board:
+                    e["smart"] = e["wallet"] in smart
+                self._json(200, {"rows": board[:100], "smart_count": len(smart)})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+        elif self.path.startswith("/api/stats"):
+            try:
+                self._json(200, outcomes.stats_data())
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+        elif self.path.startswith("/api/setups"):
+            with state["lock"]:
+                self._json(200, state["setups"])
         else:
             self._send(404, b"not found", "text/plain")
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/api/job":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                req = json.loads(self.rfile.read(length) or b"{}")
+                name = req.get("name")
+                if name not in JOBS:
+                    self._json(400, {"error": f"unknown job; valid: {list(JOBS)}"})
+                else:
+                    self._json(200, start_job(name))
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+            return
         if self.path != "/api/scan":
             self._send(404, b"not found", "text/plain")
             return

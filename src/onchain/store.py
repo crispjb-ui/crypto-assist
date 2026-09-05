@@ -142,6 +142,20 @@ def record_outcome(run_id: int, status: str, price_usd: float | None,
         )
 
 
+def latest_scores(tokens: list[str]) -> dict[str, int]:
+    """Most recent diligence score per token (current chain), for cross-checks."""
+    if not tokens:
+        return {}
+    marks = ",".join("?" * len(tokens))
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT token, score FROM runs WHERE token IN ({marks}) "
+            f"AND {_chain_filter()} ORDER BY ts",
+            (*[t.lower() for t in tokens], config.CHAIN_KEY),
+        ).fetchall()
+    return {t: s for t, s in rows}
+
+
 def runs_awaiting_outcome(min_age_hours: float = 24.0) -> list[sqlite3.Row]:
     cutoff = int(time.time() - min_age_hours * 3600)
     with connect() as conn:

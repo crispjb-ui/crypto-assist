@@ -166,6 +166,21 @@ def main() -> None:
         traceback.print_exc()
         failures += 1
 
+    _stage("accumulation setups")
+    try:
+        from . import setups
+        rows = setups.scan()
+        if rows:
+            for r in rows[:10]:
+                print(f"  {r['symbol']:>10.10}  -{r['drawdown_pct']}% flush, "
+                      f"+{r['recovery_pct']}% recovery, "
+                      f"liq ${r['liquidity_usd']:,}  {r['token'] or r['pool']}")
+        else:
+            print("no setups matched today (rare by definition)")
+    except Exception:
+        traceback.print_exc()
+        failures += 1
+
     _stage("candidate shortlist")
     try:
         print_shortlist(pons_launches, long_launches, run_started)

@@ -91,16 +91,12 @@ def cmd_update(min_age_hours: float) -> None:
     print(f"\n{len(pending)} run(s) labeled. Now: python -m src.onchain.outcomes stats")
 
 
-def cmd_stats() -> None:
+def stats_data() -> dict:
+    """Calibration stats as data — shared by the CLI and the dashboard."""
     rows = store.scored_runs_with_outcomes()
-    if not rows:
-        print("No labeled runs yet. Run some reports, wait 24h, then "
-              "`python -m src.onchain.outcomes update`.")
-        return
-
     bad_states = {"rugged", "dead"}
     per_flag: dict[str, dict[str, int]] = defaultdict(lambda: {"bad": 0, "alive": 0})
-    misses: list[tuple[str, int, str]] = []
+    misses: list[dict] = []
     total_bad = total_alive = 0
 
     for row in rows:
@@ -111,22 +107,37 @@ def cmd_stats() -> None:
             key = _flag_key(flag)
             per_flag[key]["bad" if is_bad else "alive"] += 1
         if is_bad and row["score"] <= CLEAN_SCORE_MAX:
-            misses.append((row["token"], row["score"], row["status"]))
+            misses.append({"token": row["token"], "score": row["score"],
+                           "status": row["status"]})
 
-    print(f"Labeled runs: {len(rows)}  (bad: {total_bad}, alive: {total_alive})\n")
-    print(f"{'flag':50} {'fired':>6} {'bad':>5} {'alive':>6} {'precision':>10}")
+    flags = []
     for key, counts in sorted(per_flag.items(),
-                              key=lambda kv: -(kv[1]['bad'] + kv[1]['alive'])):
+                              key=lambda kv: -(kv[1]["bad"] + kv[1]["alive"])):
         fired = counts["bad"] + counts["alive"]
-        precision = counts["bad"] / fired if fired else 0.0
-        print(f"{key:50} {fired:>6} {counts['bad']:>5} {counts['alive']:>6} "
-              f"{precision:>9.0%}")
+        flags.append({"flag": key, "fired": fired, "bad": counts["bad"],
+                      "alive": counts["alive"],
+                      "precision": counts["bad"] / fired if fired else 0.0})
+    return {"labeled": len(rows), "bad": total_bad, "alive": total_alive,
+            "flags": flags, "misses": misses,
+            "clean_score_max": CLEAN_SCORE_MAX}
 
-    if misses:
-        print(f"\nMISSES — went bad but scored <= {CLEAN_SCORE_MAX} (each one is a "
-              "detector gap; inspect its stored run data):")
-        for token, score, status in misses:
-            print(f"  {token}  scored {score}  -> {status}")
+
+def cmd_stats() -> None:
+    d = stats_data()
+    if not d["labeled"]:
+        print("No labeled runs yet. Run some reports, wait 24h, then "
+              "`python -m src.onchain.outcomes update`.")
+        return
+    print(f"Labeled runs: {d['labeled']}  (bad: {d['bad']}, alive: {d['alive']})\n")
+    print(f"{'flag':50} {'fired':>6} {'bad':>5} {'alive':>6} {'precision':>10}")
+    for f in d["flags"]:
+        print(f"{f['flag']:50} {f['fired']:>6} {f['bad']:>5} {f['alive']:>6} "
+              f"{f['precision']:>9.0%}")
+    if d["misses"]:
+        print(f"\nMISSES — went bad but scored <= {d['clean_score_max']} (each "
+              "one is a detector gap; inspect its stored run data):")
+        for m in d["misses"]:
+            print(f"  {m['token']}  scored {m['score']}  -> {m['status']}")
     else:
         print("\nNo misses among labeled runs.")
     print("\nInterpretation: low-precision flags over-fire (candidates for "
