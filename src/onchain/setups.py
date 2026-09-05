@@ -37,9 +37,10 @@ MIN_VOL24_USD = 3_000.0
 MIN_AGE_DAYS = 5.0
 
 
-# GeckoTerminal's free tier rate-limits aggressively; stay polite and wait
-# out 429s rather than dying — this runs as a background job.
-MIN_CALL_GAP_SECONDS = 1.5
+# GeckoTerminal's free tier allows ~30 calls/min; 2.5s spacing (24/min) stays
+# under it. This runs as a background job, so slow-but-complete beats fast-but-
+# throttled.
+MIN_CALL_GAP_SECONDS = 2.5
 _last_call = 0.0
 
 
@@ -53,8 +54,10 @@ def _get(path: str, params: dict | None = None):
                             timeout=30, headers={"Accept": "application/json"})
         _last_call = time.time()
         if resp.status_code == 429 and attempt < 2:
-            print("note: GeckoTerminal rate limit — pausing 30s", file=sys.stderr)
-            time.sleep(30)
+            wait_s = 20 * (attempt + 1)
+            print(f"note: GeckoTerminal rate limit — pausing {wait_s}s",
+                  file=sys.stderr)
+            time.sleep(wait_s)
             continue
         resp.raise_for_status()
         return resp.json()
