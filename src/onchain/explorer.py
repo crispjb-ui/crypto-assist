@@ -46,19 +46,52 @@ def first_transactions(address: str, limit: int = 10) -> list[dict] | None:
     return result if isinstance(result, list) else ([] if result is not None else None)
 
 
-def funding_source(address: str) -> str | None:
-    """First address that sent native currency to this wallet, if traceable."""
-    txs = first_transactions(address, limit=10)
-    if not txs:
-        return None
+def internal_transactions(address: str, limit: int = 20) -> list[dict] | None:
+    """Oldest internal (contract-mediated) transfers for an address, ascending.
+    None = explorer unavailable. Captures funding sent through a disperser or
+    airdrop contract, which external txlist alone misses."""
+    result = _get({
+        "module": "account", "action": "txlistinternal", "address": address,
+        "startblock": 0, "endblock": 99999999, "page": 1,
+        "offset": limit, "sort": "asc",
+    })
+    return result if isinstance(result, list) else ([] if result is not None else None)
+
+
+def funding_event(address: str) -> dict | None:
+    """Earliest inbound native transfer to this wallet across external AND
+    internal transfers. Returns {from, hash, internal, block} or None.
+
+    The `from` of an internal transfer is the disperser/airdrop CONTRACT, not
+    the human funder — callers resolve the true origin from the parent tx.
+    """
     addr = address.lower()
-    for tx in txs:
+    candidates: list[dict] = []
+    for tx in first_transactions(address, limit=10) or []:
         try:
             if tx.get("to", "").lower() == addr and int(tx.get("value", "0")) > 0:
-                return tx.get("from", "").lower() or None
+                candidates.append({"from": tx.get("from", "").lower(),
+                                   "hash": tx.get("hash"), "internal": False,
+                                   "block": int(tx.get("blockNumber", "0"))})
         except (ValueError, AttributeError):
             continue
-    return None
+    for tx in internal_transactions(address, limit=10) or []:
+        try:
+            if tx.get("to", "").lower() == addr and int(tx.get("value", "0")) > 0:
+                candidates.append({"from": tx.get("from", "").lower(),
+                                   "hash": tx.get("hash"), "internal": True,
+                                   "block": int(tx.get("blockNumber", "0"))})
+        except (ValueError, AttributeError):
+            continue
+    if not candidates:
+        return None
+    return min(candidates, key=lambda c: c["block"])
+
+
+def funding_source(address: str) -> str | None:
+    """First address that sent native currency to this wallet, if traceable."""
+    ev = funding_event(address)
+    return ev["from"] if ev else None
 
 
 def get_contract_source(address: str) -> str | None:

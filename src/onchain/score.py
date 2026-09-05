@@ -71,6 +71,15 @@ def evaluate(token: TokenInfo, launch: LaunchWindow | None,
         if clusters.offloaded_count / n >= 0.5:
             v.add(3, f"{clusters.offloaded_count}/{n} early buyers already offloaded "
                      "(<10% of buy retained)", "sniper-offload")
+        if getattr(clusters, "funder_via_contract", False) and clusters.funding_clusters:
+            v.add(2, "early buyers funded through a disperser/airdrop contract "
+                     "(batch-funded cohort, not organic arrivals)",
+                  "disperser-funded")
+        if getattr(clusters, "recycle_txs", 0) >= 5:
+            v.add(3, f"{clusters.recycle_txs} same-tx sell→rebuy cycles to "
+                     f"{clusters.recycle_new_recipients} fresh wallets — "
+                     "redistribution choreography inflating apparent holders",
+                  "redistribution-recycling")
 
     # --- holders ---
     if holders:

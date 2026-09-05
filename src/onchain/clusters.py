@@ -6,10 +6,10 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from . import explorer
-from .early_buyers import LaunchWindow
+from . import config, explorer
+from .early_buyers import TRANSFER_TOPIC, LaunchWindow
 from .erc20 import balance_of
-from .rpc import EvmRpc
+from .rpc import EvmRpc, RpcError
 
 
 @dataclass
@@ -30,6 +30,55 @@ class ClusterReport:
     fresh_wallet_count: int = 0
     offloaded_count: int = 0
     funding_traced: bool = False
+    funder_via_contract: bool = False    # funding ran through a disperser/airdrop
+    recycle_txs: int = 0                 # same-tx sell+rebuy-to-new-wallet count
+    recycle_new_recipients: int = 0      # distinct fresh recipients of recycles
+
+
+def _origin_of_funding(rpc: EvmRpc, ev: dict) -> str | None:
+    """Resolve the human funder behind a funding event. For a direct transfer
+    that is the sender; for a contract-mediated one (disperser/airdrop) it is
+    the parent transaction's origin, not the contract."""
+    if not ev.get("internal"):
+        return ev.get("from")
+    txh = ev.get("hash")
+    if not txh:
+        return ev.get("from")
+    try:
+        tx = rpc.call("eth_getTransactionByHash", [txh])
+    except RpcError:
+        return ev.get("from")
+    return (tx.get("from") or "").lower() if isinstance(tx, dict) else ev.get("from")
+
+
+def detect_recycling(transfer_logs: list[dict], pair: str) -> tuple[int, int]:
+    """Same-transaction sell + rebuy-to-a-different-wallet: the choreography
+    that broadens apparent distribution without new net capital. Pure function
+    over token Transfer logs; counts such txs and the distinct fresh recipients.
+    """
+    pair_t = pair.lower()
+    by_tx: dict[str, dict[str, list]] = defaultdict(lambda: {"sell": [], "buy": []})
+    for log in transfer_logs:
+        topics = log.get("topics") or []
+        if len(topics) < 3:
+            continue
+        src = "0x" + topics[1][-40:]
+        dst = "0x" + topics[2][-40:]
+        txh = log.get("transactionHash")
+        if src == pair_t:
+            by_tx[txh]["buy"].append(dst)      # pair -> wallet (a buy)
+        elif dst == pair_t:
+            by_tx[txh]["sell"].append(src)     # wallet -> pair (a sell)
+    recycle_txs = 0
+    recipients: set[str] = set()
+    for sides in by_tx.values():
+        if sides["sell"] and sides["buy"]:
+            sellers = set(sides["sell"])
+            fresh = [b for b in sides["buy"] if b not in sellers and b != pair_t]
+            if fresh:
+                recycle_txs += 1
+                recipients.update(fresh)
+    return recycle_txs, len(recipients)
 
 
 def analyze_clusters(rpc: EvmRpc, token: str, launch: LaunchWindow,
@@ -55,11 +104,15 @@ def analyze_clusters(rpc: EvmRpc, token: str, launch: LaunchWindow,
             if p.nonce_at_launch <= fresh_nonce_max:
                 report.fresh_wallet_count += 1
 
-        funder = explorer.funding_source(buyer.wallet)
-        if funder is not None:
+        ev = explorer.funding_event(buyer.wallet)
+        if ev is not None:
             report.funding_traced = True
+            if ev.get("internal"):
+                report.funder_via_contract = True
+            funder = _origin_of_funding(rpc, ev)
             p.funder = funder
-            by_funder[funder].append(buyer.wallet)
+            if funder:
+                by_funder[funder].append(buyer.wallet)
 
         p.still_holds = balance_of(rpc, token, buyer.wallet)
         p.retention_pct = (100.0 * p.still_holds / buyer.bought) if buyer.bought else 0.0
@@ -69,4 +122,15 @@ def analyze_clusters(rpc: EvmRpc, token: str, launch: LaunchWindow,
         report.profiles.append(p)
 
     report.funding_clusters = {f: ws for f, ws in by_funder.items() if len(ws) >= 2}
+
+    # Redistribution recycling: scan the token's Transfer logs across the
+    # post-launch window (minutes, so a wider window than the buyer snapshot).
+    try:
+        window = rpc.blocks_for_seconds(900, floor=200, cap=8_000)
+        logs = rpc.get_logs(launch_block, launch_block + window,
+                            address=token, topics=[TRANSFER_TOPIC])
+        report.recycle_txs, report.recycle_new_recipients = \
+            detect_recycling(logs, launch.pair)
+    except RpcError:
+        pass
     return report
