@@ -203,6 +203,8 @@ async function refresh() {
       d.last_scan ? "last scan " + new Date(d.last_scan*1000).toLocaleTimeString()
                   : "waiting for first scan…";
     if (d.last_error) $("#status").textContent += " — error: " + d.last_error;
+    if (d.explorer && !d.explorer.ok)
+      $("#status").textContent += " · EXPLORER FAILING: " + (d.explorer.error || "?");
     const only = $("#watchonly").checked;
     let rows = d.rows;
     if (only) rows = rows.filter(x =>

@@ -40,6 +40,7 @@ state = {
     "entrypoints": {},   # unrecognized Pons launch entrypoints (for exact support)
     "jobs": {},          # name -> {status, started, finished, error, result}
     "setups": {"rows": [], "ts": None},
+    "explorer": None,
 }
 
 _setups_running = threading.Lock()
@@ -294,9 +295,18 @@ def _run_due_auto_jobs() -> None:
 
 
 def scanner_loop() -> None:
+    from . import explorer
     last_setups = 0.0
     while True:
         state["scanning"] = True
+        try:
+            h = explorer.health()
+            with state["lock"]:
+                state["explorer"] = h
+            if not h["ok"]:
+                print(f"explorer check FAILED: {h['error']}", flush=True)
+        except Exception:
+            traceback.print_exc()
         try:
             scan_once()
         except Exception as exc:
@@ -344,7 +354,8 @@ class Handler(BaseHTTPRequestHandler):
                                  "scanning": state["scanning"],
                                  "last_error": state["last_error"],
                                  "entrypoints": list(state["entrypoints"].values()),
-                                 "jobs": state["jobs"]})
+                                 "jobs": state["jobs"],
+                                 "explorer": state["explorer"]})
         elif self.path.startswith("/api/wallets"):
             try:
                 everyone = wallets.leaderboard(min_tokens=1)

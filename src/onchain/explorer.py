@@ -11,6 +11,22 @@ import requests
 
 from . import config
 
+LAST_ERROR: str | None = None   # most recent request failure, for diagnostics
+
+
+def health() -> dict:
+    """One cheap live probe of the configured explorer, with the exact failure
+    when it doesn't work — the ambiguous 'not traced' notes hid a wrong URL,
+    an unreachable host, and a disabled API behind the same wording."""
+    if not config.EXPLORER_API_URL:
+        return {"configured": False, "ok": False,
+                "error": "EXPLORER_API_URL not set in .env"}
+    result = _get({"module": "block", "action": "eth_block_number"})
+    if result is not None:
+        return {"configured": True, "ok": True, "error": None}
+    return {"configured": True, "ok": False,
+            "error": LAST_ERROR or "empty response from explorer"}
+
 
 def _get(params: dict) -> dict | list | None:
     # plain requests.get (no shared Session): callers parallelize these
@@ -19,6 +35,7 @@ def _get(params: dict) -> dict | list | None:
         return None
     if config.EXPLORER_API_KEY:
         params = {**params, "apikey": config.EXPLORER_API_KEY}
+    global LAST_ERROR
     for attempt in range(2):
         try:
             resp = requests.get(config.EXPLORER_API_URL, params=params, timeout=8)
@@ -28,8 +45,10 @@ def _get(params: dict) -> dict | list | None:
             result = body.get("result")
             if isinstance(result, str) and "rate limit" in result.lower():
                 raise requests.RequestException(result)
+            LAST_ERROR = None
             return result
-        except (requests.RequestException, ValueError):
+        except (requests.RequestException, ValueError) as exc:
+            LAST_ERROR = f"{type(exc).__name__}: {str(exc)[:160]}"
             if attempt >= 1:      # final attempt: fail fast, no pointless sleep
                 return None
             time.sleep(1)

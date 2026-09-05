@@ -39,7 +39,11 @@ def evaluate(token: TokenInfo, launch: LaunchWindow | None,
     if token.source_verified is False:
         v.add(2, "contract source not verified", "unverified-source")
     elif token.source_verified is None:
-        v.notes.append("no explorer API configured — source verification not checked")
+        from . import config as _cfg
+        v.notes.append(
+            "explorer configured but source lookup failed — see the explorer "
+            "status in the dashboard header" if _cfg.EXPLORER_API_URL else
+            "no explorer API configured — source verification not checked")
     if token.suspect_source_hits:
         v.add(1, "source contains: " + ", ".join(token.suspect_source_hits)
                  + " (read these functions manually)", "suspect-source")
@@ -63,8 +67,13 @@ def evaluate(token: TokenInfo, launch: LaunchWindow | None,
             v.add(3, f"{len(biggest[1])} early buyers share funder {biggest[0]} "
                      f"({len(clusters.funding_clusters)} funding cluster(s) total)", "funding-cluster")
         elif not clusters.funding_traced:
-            v.notes.append("funding sources not traced (no explorer API, or wallets "
-                           "funded cross-chain) — fresh-wallet nonce is the fallback signal")
+            from . import config as _cfg
+            v.notes.append(
+                ("funding sources not traced — explorer configured but calls "
+                 "failed; see the explorer status in the dashboard header"
+                 if _cfg.EXPLORER_API_URL else
+                 "funding sources not traced (no explorer API configured)")
+                + " — fresh-wallet nonce is the fallback signal")
         if clusters.fresh_wallet_count / n >= 0.5:
             v.add(2, f"{clusters.fresh_wallet_count}/{n} early buyers were fresh wallets "
                      "(nonce ≤ 3 at launch)", "fresh-wallets")
