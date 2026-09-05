@@ -101,7 +101,17 @@ def _addr(topic: str) -> str:
 
 
 def _looks_like_address_word(w: str) -> bool:
-    return len(w) == 64 and w[:24] == "0" * 24 and int(w[24:], 16) != 0
+    """A 32-byte word that is a left-padded 20-byte address. Rejects ABI
+    offset/length pointers (small values like 0xc0, 0xa60) that are also
+    12-byte-zero-padded — the high bytes of a real address are ~never zero,
+    while an offset's are always zero. Guards the calldata heuristic against
+    mistaking an ABI pointer table for an address array."""
+    if len(w) != 64 or w[:24] != "0" * 24:
+        return False
+    body = w[24:]                       # the 20-byte (40-hex) address portion
+    if int(body, 16) == 0:
+        return False
+    return int(body[:12], 16) != 0      # top 6 bytes nonzero → not an offset
 
 
 def _heuristic_address_array(body: str) -> list[str]:

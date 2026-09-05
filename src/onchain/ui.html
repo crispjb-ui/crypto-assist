@@ -118,6 +118,7 @@ ledger ≠ supply migrated to strong hands — run the deep scan and read holder
 
 <section class="tab" data-tabname="wallets">
   <h2>Smart-wallet leaderboard — realized PnL measured on-chain, per quote</h2>
+  <p class="detail" id="walletsummary"></p>
   <table id="wallets"><tbody></tbody></table>
 </section>
 
@@ -197,6 +198,12 @@ async function loadSetups() {
 async function loadWallets() {
   const d = await (await fetch("/api/wallets")).json();
   const rows = d.rows || [];
+  $("#walletsummary").textContent =
+    `${d.smart_count ?? 0} wallet(s) meet the smart-money bar ` +
+    `(≥4 tokens, ≥60% wins, net-positive each quote). ` +
+    `${d.repeat_wallet_count ?? 0} traded ≥2 launches (shown below). ` +
+    `${d.single_launch_count ?? 0} of ${d.total_tracked ?? 0} tracked wallets ` +
+    `hit only one launch — a single 100% win is not signal and is hidden.`;
   $("#wallets tbody").innerHTML =
     `<tr><th>wallet</th><th>tokens</th><th>wins</th><th>win rate</th>
      <th>realized</th><th></th></tr>` +
@@ -207,7 +214,10 @@ async function loadWallets() {
             .map(([q,v]) => (v>=0?"+":"") + v.toFixed(3) + " " + q).join(", "))}</td>
       <td>${r.smart ? '<span class="smarttag">SMART</span>' : ""}</td>
     </tr>`).join("") ||
-    '<tr><td class="detail" colspan="6">no wallet data yet — run "Ingest wallet PnL"</td></tr>');
+    '<tr><td class="detail" colspan="6">No wallet has traded ≥2 launches yet. ' +
+    'Most launch wallets here are single-use — keep ingesting; if repeat ' +
+    'wallets stay near zero, this chain’s edge is launch-coordination ' +
+    'detection, not wallet-shadowing.</td></tr>');
 }
 
 async function loadStats() {

@@ -240,11 +240,20 @@ class Handler(BaseHTTPRequestHandler):
                                  "jobs": state["jobs"]})
         elif self.path.startswith("/api/wallets"):
             try:
-                board = wallets.leaderboard(min_tokens=1)
+                everyone = wallets.leaderboard(min_tokens=1)
                 smart = wallets.smart_set()
-                for e in board:
+                # Headline wallets with a real sample (>=2 tokens); a single
+                # 100%-win launch is survivorship noise, not an edge.
+                repeat = [e for e in everyone if e["tokens"] >= 2]
+                for e in repeat:
                     e["smart"] = e["wallet"] in smart
-                self._json(200, {"rows": board[:100], "smart_count": len(smart)})
+                self._json(200, {
+                    "rows": repeat[:100],
+                    "smart_count": len(smart),
+                    "repeat_wallet_count": len(repeat),
+                    "total_tracked": len(everyone),
+                    "single_launch_count": len(everyone) - len(repeat),
+                })
             except Exception as exc:
                 self._json(500, {"error": str(exc)})
         elif self.path.startswith("/api/stats"):
