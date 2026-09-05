@@ -29,6 +29,11 @@ class EvmRpc:
                 resp = self.session.post(self.url, json=payload, timeout=self.timeout)
                 if resp.status_code == 429:
                     raise RpcError("rate limited")
+                if 400 <= resp.status_code < 500:
+                    # Providers signal oversized/invalid queries via HTTP 4xx;
+                    # surface as RpcError (non-retryable) so get_logs can
+                    # shrink its range instead of retrying to death.
+                    raise RpcError(f"http {resp.status_code}: {resp.text[:200]}")
                 resp.raise_for_status()
                 body = resp.json()
                 if "error" in body:

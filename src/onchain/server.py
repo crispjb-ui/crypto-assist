@@ -20,6 +20,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from . import config
 from . import long as long_mod
 from . import outcomes, pons, report, setups, wallets
 from .pons import block_near_time
@@ -47,12 +48,32 @@ def _setups_job() -> None:
         state["setups"] = {"rows": rows, "ts": int(time.time())}
 
 
+def _probe_entrypoints_job() -> None:
+    """Fetch each unrecognized entrypoint's sample tx and analyze its calldata
+    structure — the copyable output is what turns heuristic bundle decoding
+    into exact decoding."""
+    rpc = EvmRpc()
+    with state["lock"]:
+        entries = list(state["entrypoints"].values())
+    for e in entries:
+        try:
+            tx = rpc.call("eth_getTransactionByHash", [e["sample_tx"]])
+            if isinstance(tx, dict):
+                e["probe"] = pons.probe_calldata(tx.get("input", ""))
+        except Exception as exc:
+            e["probe"] = {"error": _redact(str(exc))}
+    with state["lock"]:
+        for e in entries:
+            state["entrypoints"][f"{e['entrypoint']} {e['selector']}"] = e
+
+
 JOBS = {
     "wallets_scan": ("Ingest wallet PnL (24h)",
                      lambda: wallets.scan(hours=24, limit=150)),
     "outcomes_update": ("Label outcomes now",
                         lambda: outcomes.cmd_update(min_age_hours=20.0)),
     "setups_scan": ("Scan accumulation setups", _setups_job),
+    "probe_entrypoints": ("Analyze entrypoints", _probe_entrypoints_job),
 }
 
 
@@ -76,6 +97,13 @@ def start_job(name: str) -> dict:
                                "finished": None, "error": None}
     threading.Thread(target=_run_job, args=(name,), daemon=True).start()
     return {"started": name}
+
+
+def _redact(text: str) -> str:
+    """Never show the RPC URL (it embeds the API key) in the UI."""
+    if config.EVM_RPC_URL:
+        text = text.replace(config.EVM_RPC_URL, "<rpc-url>")
+    return text
 
 
 def classify_pons(l) -> str:
@@ -122,9 +150,12 @@ def scan_once() -> None:
             "detail": (f"{l.exempt_buys} tax-free snipes "
                        f"({l.exempt_buy_quote / 1e18:.2f}q), "
                        f"{l.taxed_buys} taxed buys"
-                       + (f", {len(l.declared_exemptions)} "
-                          f"{'declared' if l.exemption_source == 'exact' else 'candidate'}"
-                          " exempt wallets" if l.declared_exemptions else "")
+                       + (", {} {} exempt wallets".format(
+                              len(l.declared_exemptions),
+                              {"exact": "declared",
+                               "corroborated": "confirmed"}.get(
+                                  l.exemption_source, "candidate"))
+                          if l.declared_exemptions else "")
                        + (f" — SMART MONEY x{len(smart_hits)}" if smart_hits else "")),
         }
     for l in long_mod.recent_launches(rpc, from_block, to_block, deep=True,
@@ -164,7 +195,7 @@ def scanner_loop() -> None:
         except Exception as exc:
             traceback.print_exc()
             with state["lock"]:
-                state["last_error"] = str(exc)
+                state["last_error"] = _redact(str(exc))
         if time.time() - last_setups >= SETUPS_INTERVAL_SECONDS:
             try:
                 _setups_job()

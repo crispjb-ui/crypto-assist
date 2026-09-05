@@ -65,6 +65,9 @@ class PonsLaunch:
     taxed_buys: int = 0            # outsiders paying the decaying tax
     exempt_buy_quote: int = 0      # total quote spent by tax-free buyers (wei)
     snipe_buyers: list[str] = field(default_factory=list)  # distinct window buyers
+    # wallets that actually bought tax-free (non-deployer): the bundle as
+    # PROVEN by execution, independent of any calldata decoding
+    exempt_buyer_wallets: list[str] = field(default_factory=list)
 
 
 def _addr(topic: str) -> str:
@@ -125,6 +128,29 @@ def exemptions_from_calldata(data: str) -> tuple[list[str], str]:
     return (found, "heuristic") if found else ([], "opaque")
 
 
+def probe_calldata(data: str) -> dict:
+    """Structural analysis of a launch tx's calldata for unrecognized
+    entrypoints: selector, size, and every length-prefixed address array with
+    its word offset. Enough to derive an exact decoder from one sample."""
+    body = data[10:] if data.startswith("0x") else data
+    words = [body[i : i + 64] for i in range(0, len(body) - 63, 64)]
+    arrays = []
+    for i, w in enumerate(words):
+        try:
+            n = int(w, 16)
+        except ValueError:
+            continue
+        if not (1 <= n <= 64):
+            continue
+        run = words[i + 1 : i + 1 + n]
+        if len(run) == n and all(_looks_like_address_word(x) for x in run):
+            arrays.append({"offset_word": i, "count": n,
+                           "first": "0x" + run[0][-40:],
+                           "last": "0x" + run[-1][-40:]})
+    return {"selector": data[:10].lower(), "words": len(words),
+            "head": words[:8], "address_arrays": arrays}
+
+
 def block_near_time(rpc: EvmRpc, target_ts: int) -> int:
     """Approximate block at a unix timestamp via interpolation (Orbit chains
     have variable block times, so sample-and-refine instead of assuming a rate)."""
@@ -171,6 +197,8 @@ def snipe_window_activity(rpc: EvmRpc, launch: PonsLaunch,
             if buyer != launch.deployer:
                 launch.exempt_buys += 1
                 launch.exempt_buy_quote += quote_in
+                if buyer not in launch.exempt_buyer_wallets:
+                    launch.exempt_buyer_wallets.append(buyer)
         else:
             launch.taxed_buys += 1
 
@@ -238,6 +266,12 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
                 entry = unknown_entrypoints.setdefault(key, [0, launch.tx_hash])
                 entry[0] += 1
             snipe_window_activity(rpc, launch, window_blocks=snipe_window_blocks)
+            # heuristic calldata list vs execution ground truth: an extracted
+            # wallet that actually bought tax-free proves the list is real
+            if (launch.exemption_source == "heuristic"
+                    and set(launch.declared_exemptions)
+                    & set(launch.exempt_buyer_wallets)):
+                launch.exemption_source = "corroborated"
         if i % 10 == 0 or i == len(launches):
             print(f"  analyzed {i}/{len(launches)}", file=sys.stderr)
 

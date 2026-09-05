@@ -97,6 +97,7 @@ Full pipeline: contract flags, launch window, clusters, holders. 10–60s.</div>
     <button class="job" data-job="wallets_scan">Ingest wallet PnL (24h)</button>
     <button class="job" data-job="outcomes_update">Label outcomes now</button>
     <button class="job" data-job="setups_scan">Scan accumulation setups</button>
+    <button class="job" data-job="probe_entrypoints">Analyze entrypoints</button>
   </div>
   <div class="jobrow" id="jobs"></div>
   <p class="disclaimer">Detects rigged launches and measured structure; a low
@@ -163,9 +164,11 @@ async function refresh() {
     const eps = d.entrypoints || [];
     $("#entrybox").style.display = eps.length ? "block" : "none";
     if (eps.length) $("#entrybox").textContent =
-      "Unrecognized launch entrypoint(s) — copy this to Claude to add exact " +
-      "bundle decoding:\n" + eps.map(e =>
-        `${e.entrypoint} selector ${e.selector} (${e.count} launches, sample tx ${e.sample_tx})`).join("\n");
+      "Unrecognized launch entrypoint(s) — press \"Analyze entrypoints\", then " +
+      "copy this whole box to Claude to add exact bundle decoding:\n" +
+      eps.map(e =>
+        `${e.entrypoint} selector ${e.selector} (${e.count} launches, sample tx ${e.sample_tx})` +
+        (e.probe ? "\n  probe: " + JSON.stringify(e.probe) : "")).join("\n");
     const jobs = d.jobs || {};
     $("#jobs").textContent = Object.entries(jobs).map(([n, j]) =>
       `${n}: ${j.status}${j.error ? " — " + j.error : ""}`).join("   ");
