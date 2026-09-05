@@ -168,7 +168,11 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
 
     if deep:
         for i, launch in enumerate(launches, 1):
-            early_activity(rpc, launch, window_blocks=window_blocks)
+            try:
+                early_activity(rpc, launch, window_blocks=window_blocks)
+            except Exception as exc:
+                print(f"note: early-activity analysis failed for "
+                      f"{launch.token} ({exc}); continuing", file=sys.stderr)
             if i % 10 == 0 or i == len(launches):
                 print(f"  analyzed {i}/{len(launches)}", file=sys.stderr)
     return launches

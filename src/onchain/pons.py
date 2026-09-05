@@ -265,7 +265,12 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
                 key = ((tx.get("to") or "?").lower(), calldata[:10].lower())
                 entry = unknown_entrypoints.setdefault(key, [0, launch.tx_hash])
                 entry[0] += 1
-            snipe_window_activity(rpc, launch, window_blocks=snipe_window_blocks)
+            try:
+                snipe_window_activity(rpc, launch,
+                                      window_blocks=snipe_window_blocks)
+            except Exception as exc:
+                print(f"note: snipe-window analysis failed for {launch.token} "
+                      f"({exc}); continuing", file=sys.stderr)
             # heuristic calldata list vs execution ground truth: an extracted
             # wallet that actually bought tax-free proves the list is real
             if (launch.exemption_source == "heuristic"

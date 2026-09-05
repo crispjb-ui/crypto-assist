@@ -107,7 +107,12 @@ class EvmRpc:
 
     def get_logs(self, from_block: int, to_block: int, address: str | None = None,
                  topics: list[Any] | None = None) -> list[dict]:
-        """Chunked eth_getLogs; splits ranges the endpoint rejects."""
+        """Chunked eth_getLogs; splits ranges the endpoint rejects. to_block is
+        clamped to the chain head — windows around very fresh launches otherwise
+        reach past it and providers reject the whole query ("Unknown block")."""
+        to_block = min(to_block, self.latest_block())
+        if from_block > to_block:
+            return []
         logs: list[dict] = []
         step = config.MAX_LOG_BLOCK_RANGE
         start = from_block

@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import requests
 
@@ -36,11 +37,28 @@ MIN_VOL24_USD = 3_000.0
 MIN_AGE_DAYS = 5.0
 
 
+# GeckoTerminal's free tier rate-limits aggressively; stay polite and wait
+# out 429s rather than dying — this runs as a background job.
+MIN_CALL_GAP_SECONDS = 1.5
+_last_call = 0.0
+
+
 def _get(path: str, params: dict | None = None):
-    resp = _session.get(f"{GECKO_BASE}{path}", params=params or {}, timeout=30,
-                        headers={"Accept": "application/json"})
-    resp.raise_for_status()
-    return resp.json()
+    global _last_call
+    for attempt in range(3):
+        wait = MIN_CALL_GAP_SECONDS - (time.time() - _last_call)
+        if wait > 0:
+            time.sleep(wait)
+        resp = _session.get(f"{GECKO_BASE}{path}", params=params or {},
+                            timeout=30, headers={"Accept": "application/json"})
+        _last_call = time.time()
+        if resp.status_code == 429 and attempt < 2:
+            print("note: GeckoTerminal rate limit — pausing 30s", file=sys.stderr)
+            time.sleep(30)
+            continue
+        resp.raise_for_status()
+        return resp.json()
+    raise requests.RequestException("GeckoTerminal rate limit persisted")
 
 
 def top_pools(pages: int = 2) -> list[dict]:

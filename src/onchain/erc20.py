@@ -69,25 +69,39 @@ def _decode_address(hexdata: str) -> str | None:
     return "0x" + hexdata[-40:]
 
 
+def _try_call(rpc: EvmRpc, to: str, data: str) -> str:
+    """eth_call that treats a revert as 'function not present' — many tokens
+    legitimately lack owner() etc., and a revert must not kill the report."""
+    from .rpc import RpcError
+    try:
+        return rpc.eth_call(to, data)
+    except RpcError:
+        return "0x"
+
+
 def balance_of(rpc: EvmRpc, token: str, holder: str) -> int:
     data = SEL_BALANCE_OF + holder.lower().replace("0x", "").rjust(64, "0")
-    return _decode_uint(rpc.eth_call(token, data))
+    return _decode_uint(_try_call(rpc, token, data))
 
 
 def inspect_token(rpc: EvmRpc, token: str) -> TokenInfo:
     info = TokenInfo(address=token.lower())
-    info.name = _decode_string(rpc.eth_call(token, SEL_NAME))
-    info.symbol = _decode_string(rpc.eth_call(token, SEL_SYMBOL))
-    info.decimals = _decode_uint(rpc.eth_call(token, SEL_DECIMALS)) or 18
-    info.total_supply = _decode_uint(rpc.eth_call(token, SEL_TOTAL_SUPPLY))
+    info.name = _decode_string(_try_call(rpc, token, SEL_NAME))
+    info.symbol = _decode_string(_try_call(rpc, token, SEL_SYMBOL))
+    info.decimals = _decode_uint(_try_call(rpc, token, SEL_DECIMALS)) or 18
+    info.total_supply = _decode_uint(_try_call(rpc, token, SEL_TOTAL_SUPPLY))
 
-    owner = _decode_address(rpc.eth_call(token, SEL_OWNER))
+    owner = _decode_address(_try_call(rpc, token, SEL_OWNER))
     info.owner = owner
     if owner is not None:
         info.owner_renounced = owner in DEAD_ADDRESSES
 
-    impl = rpc.get_storage_at(token, EIP1967_IMPL_SLOT)
-    info.is_proxy = bool(impl and int(impl, 16) != 0)
+    from .rpc import RpcError
+    try:
+        impl = rpc.get_storage_at(token, EIP1967_IMPL_SLOT)
+    except RpcError:
+        impl = "0x"
+    info.is_proxy = bool(impl and impl != "0x" and int(impl, 16) != 0)
 
     src = get_contract_source(token)
     if src is not None:
