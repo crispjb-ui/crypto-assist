@@ -84,8 +84,11 @@ def _get_v2(path: str) -> tuple[int | None, dict | list | None]:
         return None, None
     if not _gatekeeper():
         return None, None
+    url = base + path
+    if config.EXPLORER_API_KEY:
+        url += ("&" if "?" in path else "?") + "apikey=" + config.EXPLORER_API_KEY
     try:
-        resp = requests.get(base + path, timeout=config.EXPLORER_TIMEOUT, headers=_HEADERS)
+        resp = requests.get(url, timeout=config.EXPLORER_TIMEOUT, headers=_HEADERS)
         if resp.status_code == 404:
             _record(True)      # a definitive answer, not a failure
             return 404, None
