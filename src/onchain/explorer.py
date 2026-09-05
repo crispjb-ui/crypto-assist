@@ -14,18 +14,55 @@ from . import config
 LAST_ERROR: str | None = None   # most recent request failure, for diagnostics
 
 
+def _v2_base() -> str | None:
+    """Blockscout v2 REST base derived from the configured API URL — modern
+    hosted instances often disable the legacy Etherscan-compat API and serve
+    only v2 (https://host/api/v2/...)."""
+    url = config.EXPLORER_API_URL
+    if not url:
+        return None
+    base = url[:-4] if url.endswith("/api") else url
+    return base + "/api/v2"
+
+
+def _get_v2(path: str) -> tuple[int | None, dict | list | None]:
+    """(status_code, body). 404 is a meaningful answer (e.g. unverified
+    contract), any transport failure is (None, None) with LAST_ERROR set."""
+    global LAST_ERROR
+    base = _v2_base()
+    if not base:
+        return None, None
+    try:
+        resp = requests.get(base + path, timeout=8,
+                            headers={"Accept": "application/json"})
+        if resp.status_code == 404:
+            return 404, None
+        resp.raise_for_status()
+        LAST_ERROR = None
+        return resp.status_code, resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        LAST_ERROR = f"{type(exc).__name__}: {str(exc)[:160]}"
+        return None, None
+
+
 def health() -> dict:
-    """One cheap live probe of the configured explorer, with the exact failure
-    when it doesn't work — the ambiguous 'not traced' notes hid a wrong URL,
-    an unreachable host, and a disabled API behind the same wording."""
+    """Live probe with the exact failure. Reports which API generation works:
+    'etherscan-compat' (everything available) or 'v2-rest' (holders + source
+    available; funding tracing needs the legacy txlist API and stays dark)."""
     if not config.EXPLORER_API_URL:
-        return {"configured": False, "ok": False,
+        return {"configured": False, "ok": False, "level": None,
                 "error": "EXPLORER_API_URL not set in .env"}
-    result = _get({"module": "block", "action": "eth_block_number"})
-    if result is not None:
-        return {"configured": True, "ok": True, "error": None}
-    return {"configured": True, "ok": False,
-            "error": LAST_ERROR or "empty response from explorer"}
+    if _get({"module": "block", "action": "eth_block_number"}) is not None:
+        return {"configured": True, "ok": True, "level": "etherscan-compat",
+                "error": None}
+    v1_err = LAST_ERROR
+    status, body = _get_v2("/stats")
+    if status == 200 and isinstance(body, dict):
+        return {"configured": True, "ok": True, "level": "v2-rest",
+                "error": f"legacy API unavailable ({v1_err}); using v2 REST — "
+                         "holders+source active, funding tracing unavailable"}
+    return {"configured": True, "ok": False, "level": None,
+            "error": LAST_ERROR or v1_err or "empty response from explorer"}
 
 
 def _get(params: dict) -> dict | list | None:
@@ -117,12 +154,26 @@ def funding_event(address: str) -> dict | None:
 
 
 def token_holder_list(contract: str, offset: int = 500) -> list[dict] | None:
-    """Top token holders via Blockscout's Etherscan-compatible endpoint —
-    one HTTP call vs replaying the token's whole Transfer history. None when
-    the explorer is unavailable or the action unsupported."""
+    """Top token holders — one HTTP call vs replaying the token's whole
+    Transfer history. Tries the Etherscan-compat action, then Blockscout v2
+    REST (mapped to the same row shape). None when neither is available."""
     result = _get({"module": "token", "action": "tokenholderlist",
                    "contractaddress": contract, "page": 1, "offset": offset})
-    return result if isinstance(result, list) and result else None
+    if isinstance(result, list) and result:
+        return result
+    status, body = _get_v2(f"/tokens/{contract}/holders")
+    items = (body or {}).get("items") if isinstance(body, dict) else None
+    if not items:
+        return None
+    rows = []
+    for it in items:
+        addr = ((it.get("address") or {}).get("hash")
+                if isinstance(it.get("address"), dict) else it.get("address"))
+        val = it.get("value")
+        if addr and val is not None:
+            rows.append({"TokenHolderAddress": str(addr),
+                         "TokenHolderQuantity": str(val)})
+    return rows or None
 
 
 _creation_cache: dict[str, str | None] = {}
@@ -152,9 +203,20 @@ def funding_source(address: str) -> str | None:
 
 
 def get_contract_source(address: str) -> str | None:
-    """Concatenated verified source, "" if unverified, None if no explorer configured."""
+    """Concatenated verified source, "" if unverified, None if the explorer is
+    unavailable. Tries Etherscan-compat, then Blockscout v2 REST (where a 404
+    on /smart-contracts/{addr} is the 'not verified' answer)."""
     result = _get({"module": "contract", "action": "getsourcecode", "address": address})
-    if not isinstance(result, list) or not result:
-        return None
-    entry = result[0] if isinstance(result[0], dict) else {}
-    return entry.get("SourceCode", "") or ""
+    if isinstance(result, list) and result:
+        entry = result[0] if isinstance(result[0], dict) else {}
+        return entry.get("SourceCode", "") or ""
+    status, body = _get_v2(f"/smart-contracts/{address}")
+    if status == 404:
+        return ""            # explorer answered: not a verified contract
+    if status == 200 and isinstance(body, dict):
+        parts = [body.get("source_code") or ""]
+        for extra in body.get("additional_sources") or []:
+            if isinstance(extra, dict):
+                parts.append(extra.get("source_code") or "")
+        return "\n".join(p for p in parts if p)
+    return None
