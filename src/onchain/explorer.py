@@ -106,14 +106,24 @@ def token_holder_list(contract: str, offset: int = 500) -> list[dict] | None:
     return result if isinstance(result, list) and result else None
 
 
+_creation_cache: dict[str, str | None] = {}
+
+
 def contract_creation_tx(address: str) -> str | None:
     """Creation tx hash via the explorer (1 call) — much cheaper than a
-    ~25-call deploy-block binary search. None when unavailable."""
+    ~25-call deploy-block binary search. None when unavailable. Memoized:
+    launch analysis and the curve check both need it for the same pair."""
+    key = address.lower()
+    if key in _creation_cache:
+        return _creation_cache[key]
     result = _get({"module": "contract", "action": "getcontractcreation",
                    "contractaddresses": address})
+    txh = None
     if isinstance(result, list) and result and isinstance(result[0], dict):
-        return result[0].get("txHash") or result[0].get("txhash")
-    return None
+        txh = result[0].get("txHash") or result[0].get("txhash")
+    if txh is not None or result is not None:  # don't cache outages
+        _creation_cache[key] = txh
+    return txh
 
 
 def funding_source(address: str) -> str | None:

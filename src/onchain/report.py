@@ -93,19 +93,44 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
                 "feeds print it per token.")
         pair = POOL_MANAGER
 
-    token_info = inspect_token(rpc, token)
+    token_info = inspect_token(rpc, token, include_source=False)
     launch = analyze_launch(rpc, token, pair, creation_block=creation_block)
-    clusters = analyze_clusters(rpc, token, launch)
-    curve = _curve_snipe_activity(rpc, token, pair, launch.creation_block)
-    holders = None
-    if not bundle_only:
+
+    # The four remaining phases are independent given `launch` — run them
+    # concurrently (each on its own RPC client; a shared requests.Session is
+    # not guaranteed thread-safe). This is most of the scan's wall time.
+    from concurrent.futures import ThreadPoolExecutor
+    from .erc20 import apply_source_checks
+    from .explorer import get_contract_source
+
+    def _clone() -> EvmRpc:
+        c = EvmRpc(rpc.url)
+        c._block_rate = rpc._block_rate
+        return c
+
+    def _holders_phase():
         from .early_buyers import resolve_creation_block
+        hrpc = _clone()
         try:
             token_deploy = resolve_creation_block(
-                rpc, token, hi=launch.window_end_block + 1)
+                hrpc, token, hi=launch.window_end_block + 1)
         except RpcError:
             token_deploy = launch.creation_block
-        holders = holder_stats(rpc, token, token_deploy, exclude={pair})
+        return holder_stats(hrpc, token, token_deploy, exclude={pair})
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_source = ex.submit(get_contract_source, token)
+        f_curve = ex.submit(_curve_snipe_activity, _clone(), token, pair,
+                            launch.creation_block)
+        f_clusters = ex.submit(analyze_clusters, _clone(), token, launch)
+        f_holders = ex.submit(_holders_phase) if not bundle_only else None
+        clusters = f_clusters.result()
+        curve = f_curve.result()
+        holders = f_holders.result() if f_holders is not None else None
+        try:
+            apply_source_checks(token_info, f_source.result())
+        except Exception as exc:
+            print(f"note: source check skipped ({exc})", file=sys.stderr)
 
     verdict = evaluate(token_info, launch, clusters, holders)
     if curve is not None:

@@ -84,30 +84,41 @@ def balance_of(rpc: EvmRpc, token: str, holder: str) -> int:
     return _decode_uint(_try_call(rpc, token, data))
 
 
-def inspect_token(rpc: EvmRpc, token: str) -> TokenInfo:
-    info = TokenInfo(address=token.lower())
-    info.name = _decode_string(_try_call(rpc, token, SEL_NAME))
-    info.symbol = _decode_string(_try_call(rpc, token, SEL_SYMBOL))
-    info.decimals = _decode_uint(_try_call(rpc, token, SEL_DECIMALS)) or 18
-    info.total_supply = _decode_uint(_try_call(rpc, token, SEL_TOTAL_SUPPLY))
+def apply_source_checks(info: TokenInfo, src: str | None) -> None:
+    """Fold a verified-source fetch into the token info (separable so the
+    fetch can run concurrently with other analysis phases)."""
+    if src is None:
+        return
+    info.source_verified = bool(src)
+    lowered = src.lower()
+    info.suspect_source_hits = sorted(
+        {p for p in SUSPECT_SOURCE_PATTERNS if p in lowered})
 
-    owner = _decode_address(_try_call(rpc, token, SEL_OWNER))
+
+def inspect_token(rpc: EvmRpc, token: str,
+                  include_source: bool = True) -> TokenInfo:
+    info = TokenInfo(address=token.lower())
+    # one batched round trip for all metadata + the proxy slot; a per-item
+    # failure/revert comes back as None and reads as "not present"
+    results = rpc.batch([
+        ("eth_call", [{"to": token, "data": SEL_NAME}, "latest"]),
+        ("eth_call", [{"to": token, "data": SEL_SYMBOL}, "latest"]),
+        ("eth_call", [{"to": token, "data": SEL_DECIMALS}, "latest"]),
+        ("eth_call", [{"to": token, "data": SEL_TOTAL_SUPPLY}, "latest"]),
+        ("eth_call", [{"to": token, "data": SEL_OWNER}, "latest"]),
+        ("eth_getStorageAt", [token, EIP1967_IMPL_SLOT, "latest"]),
+    ])
+    name_h, sym_h, dec_h, sup_h, own_h, impl = \
+        [r if isinstance(r, str) else "0x" for r in results]
+    info.name = _decode_string(name_h)
+    info.symbol = _decode_string(sym_h)
+    info.decimals = _decode_uint(dec_h) or 18
+    info.total_supply = _decode_uint(sup_h)
+    owner = _decode_address(own_h)
     info.owner = owner
     if owner is not None:
         info.owner_renounced = owner in DEAD_ADDRESSES
-
-    from .rpc import RpcError
-    try:
-        impl = rpc.get_storage_at(token, EIP1967_IMPL_SLOT)
-    except RpcError:
-        impl = "0x"
     info.is_proxy = bool(impl and impl != "0x" and int(impl, 16) != 0)
-
-    src = get_contract_source(token)
-    if src is not None:
-        info.source_verified = bool(src)
-        lowered = src.lower()
-        info.suspect_source_hits = sorted(
-            {p for p in SUSPECT_SOURCE_PATTERNS if p in lowered}
-        )
+    if include_source:
+        apply_source_checks(info, get_contract_source(token))
     return info

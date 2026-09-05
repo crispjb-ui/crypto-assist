@@ -113,6 +113,18 @@ def analyze_clusters(rpc: EvmRpc, token: str, launch: LaunchWindow,
             lambda b: explorer.funding_event(b.wallet), traced))
     funding_by_wallet = {b.wallet: ev for b, ev in zip(traced, events)}
 
+    # Resolve the human origin behind disperser-mediated funding in ONE batched
+    # round trip (was one sequential tx fetch per internal event).
+    internal_hashes = sorted({ev["hash"] for ev in events
+                              if ev and ev.get("internal") and ev.get("hash")})
+    origin_by_hash: dict[str, str] = {}
+    if internal_hashes:
+        txs = rpc.batch([("eth_getTransactionByHash", [h])
+                         for h in internal_hashes])
+        for h, tx in zip(internal_hashes, txs):
+            if isinstance(tx, dict) and tx.get("from"):
+                origin_by_hash[h] = tx["from"].lower()
+
     by_funder: dict[str, list[str]] = defaultdict(list)
     for buyer, nonce_hex, bal_hex in zip(launch.buyers, nonces, balances):
         p = BuyerProfile(
@@ -130,7 +142,9 @@ def analyze_clusters(rpc: EvmRpc, token: str, launch: LaunchWindow,
             report.funding_traced = True
             if ev.get("internal"):
                 report.funder_via_contract = True
-            funder = _origin_of_funding(rpc, ev)
+                funder = origin_by_hash.get(ev.get("hash") or "", ev.get("from"))
+            else:
+                funder = ev.get("from")
             p.funder = funder
             if funder:
                 by_funder[funder].append(buyer.wallet)
