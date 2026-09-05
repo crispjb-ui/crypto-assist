@@ -178,7 +178,13 @@ def scan_once() -> None:
         state["feed"].update(rows)
         trimmed = sorted(state["feed"].values(), key=lambda r: -r["block"])
         state["feed"] = {r["token"]: r for r in trimmed[:FEED_CACHE_MAX]}
-        state["entrypoints"].update(entrypoints)
+        # merge, preserving any probe enrichment a previous analysis added
+        # (a plain rescan would otherwise wipe it before it can be read)
+        for k, v in entrypoints.items():
+            prev = state["entrypoints"].get(k)
+            if prev and prev.get("probe"):
+                v["probe"] = prev["probe"]
+            state["entrypoints"][k] = v
         state["last_scan"] = int(time.time())
         state["last_error"] = None
 

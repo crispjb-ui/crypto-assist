@@ -45,6 +45,25 @@ SEL_LAUNCH_PLAIN = "0xa41d5f2b"   # launchToken(TokenParams,uint256,address)
 SEL_LAUNCH_EXEMPT = "0x3580febb"  # launchToken(TokenParams,uint256,address,address[])
 SEL_LAUNCH_FOR = "0x42236f86"     # launchTokenFor(TokenParams,uint256,address,address,address[])
 
+# Launch entrypoints confirmed from live Robinhood Chain data that are NOT in
+# the published repo (deployed factory ABI drift + front-end routers). Recorded
+# as (entrypoint_lower, selector); entrypoint "*" means any caller with that
+# selector (router-family). Presence here suppresses the "unrecognized" warning
+# and marks heuristic bundle extraction as trusted — exact arg-slot decoding
+# still needs a calldata probe (see probe_calldata / the dashboard job).
+KNOWN_LAUNCH_ENTRYPOINTS = {
+    (V2_FACTORY.lower(), "0xf35abbcf"),   # factory-direct launch (deployed ABI)
+    (V2_FACTORY.lower(), "0xa72101af"),   # factory-direct launch (deployed ABI)
+    ("0xe33e9e479df8802cb0866d5d05258bec4cf62948", "0xf85f8e41"),  # dominant router
+}
+KNOWN_SELECTORS = {sel for _, sel in KNOWN_LAUNCH_ENTRYPOINTS}
+
+
+def is_known_entrypoint(to: str, selector: str) -> bool:
+    to = (to or "").lower()
+    return ((to, selector) in KNOWN_LAUNCH_ENTRYPOINTS
+            or selector in KNOWN_SELECTORS)
+
 
 @dataclass
 class PonsLaunch:
@@ -259,11 +278,16 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
         launch.graduated = launch.token in graduated_tokens
         if launch.version == 2 and isinstance(tx, dict):
             calldata = tx.get("input", "")
+            to = (tx.get("to") or "?").lower()
+            sel = calldata[:10].lower()
             launch.declared_exemptions, launch.exemption_source = \
                 exemptions_from_calldata(calldata)
-            if launch.exemption_source != "exact":
-                key = ((tx.get("to") or "?").lower(), calldata[:10].lower())
-                entry = unknown_entrypoints.setdefault(key, [0, launch.tx_hash])
+            # a confirmed launch entrypoint isn't "unrecognized" — only flag
+            # genuinely unknown ones for probing
+            if launch.exemption_source not in ("exact", "corroborated") \
+                    and not is_known_entrypoint(to, sel):
+                entry = unknown_entrypoints.setdefault((to, sel),
+                                                       [0, launch.tx_hash])
                 entry[0] += 1
             try:
                 snipe_window_activity(rpc, launch,
