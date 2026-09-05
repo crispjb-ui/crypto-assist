@@ -144,13 +144,16 @@ def leaderboard(min_tokens: int = SMART_MIN_TOKENS) -> list[dict]:
     """Win rate is unitless and aggregates across venues; realized PnL is only
     meaningful per quote currency (ETH for Pons, stock tokens for Long) and is
     therefore reported per quote, never summed across them."""
+    from . import config
     with store.connect() as conn:
         rows = conn.execute(
             "SELECT wallet, quote_symbol, COUNT(*) AS tokens, "
             "SUM(received - spent) AS realized, "
             "SUM(CASE WHEN received > spent THEN 1 ELSE 0 END) AS wins, "
             "SUM(trades) AS trades "
-            "FROM wallet_trades GROUP BY wallet, quote_symbol",
+            "FROM wallet_trades WHERE (chain = ? OR chain = '') "
+            "GROUP BY wallet, quote_symbol",
+            (config.CHAIN_KEY,),
         ).fetchall()
     per_wallet: dict[str, dict] = {}
     for (w, q, t, r, wi, tr) in rows:

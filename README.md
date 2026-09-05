@@ -74,6 +74,21 @@ python -m src.onchain.scan --max-age-hours 24 --min-liquidity-usd 20000
 
 Or in Claude Code: `/diligence 0xTOKEN`, `/scan-launches`.
 
+## Other chains
+
+The stack is chain-profile aware: `CRYPTO_ASSIST_ENV` selects which env file
+loads, and every ledger row (runs, outcomes, wallet PnL) is tagged with the
+chain so calibration and smart-money stats never mix across chains.
+
+- **Any EVM chain (BSC, Base, Arbitrum, ...)**: copy `.env.bsc.example` to
+  `.env.bsc` (or make your own profile), fill in RPC + explorer, and run any
+  CLI or a second dashboard (`CRYPTO_ASSIST_PORT=8538`) with
+  `CRYPTO_ASSIST_ENV=.env.bsc`. The generic pipeline works unchanged; the
+  Pons/Long watchers are Robinhood-chain contracts — bootstrap that chain's
+  launchpads with `derive_factory.py` on any token they launched.
+- **Solana**: not EVM — different RPC protocol, no event logs, SPL accounts,
+  pump.fun programs. Requires a parallel detector implementation; not built.
+
 ## The improvement loop
 
 Every `report.py` run is written to a local ledger (`data/diligence.db`,

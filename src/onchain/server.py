@@ -184,7 +184,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    port = 8537
+    import os
+    port = int(os.environ.get("CRYPTO_ASSIST_PORT", "8537"))
     threading.Thread(target=scanner_loop, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"crypto-assist dashboard: http://localhost:{port}")

@@ -12,6 +12,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from . import config
+
 DB_PATH = Path(__file__).resolve().parents[2] / "data" / "diligence.db"
 
 _SCHEMA = """
@@ -54,16 +56,23 @@ CREATE TABLE IF NOT EXISTS wallet_scans (
 """
 
 
+def _chain_filter(column: str = "chain") -> str:
+    """SQL fragment matching current-chain rows ('' = pre-migration legacy)."""
+    return f"({column} = ? OR {column} = '')"
+
+
 def wallet_scan_done(token: str) -> bool:
     with connect() as conn:
-        return conn.execute("SELECT 1 FROM wallet_scans WHERE token = ?",
-                            (token.lower(),)).fetchone() is not None
+        return conn.execute(
+            f"SELECT 1 FROM wallet_scans WHERE token = ? AND {_chain_filter()}",
+            (token.lower(), config.CHAIN_KEY)).fetchone() is not None
 
 
 def mark_wallet_scan(token: str) -> None:
     with connect() as conn:
-        conn.execute("INSERT OR REPLACE INTO wallet_scans (token, ts) "
-                     "VALUES (?, strftime('%s','now'))", (token.lower(),))
+        conn.execute("INSERT OR REPLACE INTO wallet_scans (token, ts, chain) "
+                     "VALUES (?, strftime('%s','now'), ?)",
+                     (token.lower(), config.CHAIN_KEY))
 
 
 def upsert_wallet_trade(wallet: str, token: str, spent: float,
@@ -72,11 +81,13 @@ def upsert_wallet_trade(wallet: str, token: str, spent: float,
     with connect() as conn:
         conn.execute(
             "INSERT INTO wallet_trades (wallet, token, spent, received, trades, "
-            "last_ts, quote_symbol) VALUES (?,?,?,?,?,strftime('%s','now'),?) "
+            "last_ts, quote_symbol, chain) "
+            "VALUES (?,?,?,?,?,strftime('%s','now'),?,?) "
             "ON CONFLICT(wallet, token) DO UPDATE SET "
             "spent = spent + excluded.spent, received = received + excluded.received, "
             "trades = trades + excluded.trades, last_ts = excluded.last_ts",
-            (wallet.lower(), token.lower(), spent, received, trades, quote_symbol),
+            (wallet.lower(), token.lower(), spent, received, trades,
+             quote_symbol, config.CHAIN_KEY),
         )
 
 
@@ -84,13 +95,20 @@ def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(_SCHEMA)
-    # migration: Long trades realize PnL in stock tokens, not ETH — totals are
-    # only meaningful per quote currency.
-    try:
-        conn.execute("ALTER TABLE wallet_trades ADD COLUMN "
-                     "quote_symbol TEXT NOT NULL DEFAULT 'ETH'")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    # migrations. quote_symbol: Long trades realize PnL in stock tokens, not
+    # ETH. chain: multi-chain profiles must not mix calibration or wallet
+    # stats; '' marks pre-migration rows, which queries treat as current-chain
+    # (all pre-migration data came from the original single-chain install).
+    for ddl in (
+        "ALTER TABLE wallet_trades ADD COLUMN quote_symbol TEXT NOT NULL DEFAULT 'ETH'",
+        "ALTER TABLE runs ADD COLUMN chain TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE wallet_trades ADD COLUMN chain TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE wallet_scans ADD COLUMN chain TEXT NOT NULL DEFAULT ''",
+    ):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # column already exists
     return conn
 
 
@@ -100,11 +118,13 @@ def log_run(token: str, pair: str | None, kind: str, score: int,
     with connect() as conn:
         cur = conn.execute(
             "INSERT INTO runs (ts, token, pair, kind, score, flags_json, "
-            "notes_json, market_json, data_json) VALUES (?,?,?,?,?,?,?,?,?)",
+            "notes_json, market_json, data_json, chain) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (int(time.time()), token.lower(), (pair or "").lower() or None, kind,
              score, json.dumps(flags), json.dumps(notes),
              json.dumps(market) if market else None,
-             json.dumps(data, default=str) if data else None),
+             json.dumps(data, default=str) if data else None,
+             config.CHAIN_KEY),
         )
         return int(cur.lastrowid)
 
@@ -129,7 +149,8 @@ def runs_awaiting_outcome(min_age_hours: float = 24.0) -> list[sqlite3.Row]:
         return conn.execute(
             "SELECT r.* FROM runs r LEFT JOIN outcomes o ON o.run_id = r.id "
             "WHERE r.ts <= ? AND (o.run_id IS NULL OR o.status = 'unknown') "
-            "ORDER BY r.ts", (cutoff,),
+            f"AND {_chain_filter('r.chain')} ORDER BY r.ts",
+            (cutoff, config.CHAIN_KEY),
         ).fetchall()
 
 
@@ -139,5 +160,7 @@ def scored_runs_with_outcomes() -> list[sqlite3.Row]:
         return conn.execute(
             "SELECT r.id, r.token, r.score, r.flags_json, o.status "
             "FROM runs r JOIN outcomes o ON o.run_id = r.id "
-            "WHERE o.status IN ('rugged','alive','dead')",
+            "WHERE o.status IN ('rugged','alive','dead') "
+            f"AND {_chain_filter('r.chain')}",
+            (config.CHAIN_KEY,),
         ).fetchall()

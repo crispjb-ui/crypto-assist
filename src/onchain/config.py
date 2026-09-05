@@ -1,11 +1,17 @@
-"""Env-driven configuration. Loads .env from the repo root if present."""
+"""Env-driven configuration. Loads .env from the repo root if present.
+
+Multi-chain: set CRYPTO_ASSIST_ENV to another profile file (e.g. ".env.bsc")
+to run any CLI or the dashboard against a different chain. Each profile is a
+complete chain config; ledger rows are tagged with the chain id so calibration
+and wallet stats never mix across chains.
+"""
 import os
 from pathlib import Path
 
 
 def _load_dotenv() -> None:
     root = Path(__file__).resolve().parents[2]
-    env = root / ".env"
+    env = root / os.environ.get("CRYPTO_ASSIST_ENV", ".env")
     if not env.is_file():
         return
     for line in env.read_text().splitlines():
@@ -34,6 +40,11 @@ MAX_LOG_BLOCK_RANGE = int(os.environ.get("MAX_LOG_BLOCK_RANGE", "5000"))
 EARLY_WINDOW_SECONDS = float(os.environ.get("EARLY_WINDOW_SECONDS", "60"))
 EARLY_WINDOW_BLOCKS = int(os.environ.get("EARLY_WINDOW_BLOCKS", "0"))  # 0 = derive
 MAX_EARLY_BUYERS = int(os.environ.get("MAX_EARLY_BUYERS", "40"))
+
+
+# Tag for ledger rows; '' would mix chains, so fall back to the RPC host.
+CHAIN_KEY = EVM_CHAIN_ID or (EVM_RPC_URL.split("//")[-1].split("/")[0]
+                             if EVM_RPC_URL else "unconfigured")
 
 
 def require_rpc() -> str:
