@@ -30,6 +30,9 @@ EVM_RPC_URL = os.environ.get("EVM_RPC_URL", "")
 EVM_CHAIN_ID = os.environ.get("EVM_CHAIN_ID", "")
 EXPLORER_API_URL = os.environ.get("EXPLORER_API_URL", "").rstrip("/")
 EXPLORER_API_KEY = os.environ.get("EXPLORER_API_KEY", "")
+# Per-request timeout for explorer calls. A slow-but-working instance may need
+# 15; the circuit breaker keeps scans fast when it truly doesn't answer.
+EXPLORER_TIMEOUT = float(os.environ.get("EXPLORER_TIMEOUT", "6"))
 DEXSCREENER_CHAIN_ID = os.environ.get("DEXSCREENER_CHAIN_ID", "")
 NATIVE_SYMBOL = os.environ.get("NATIVE_SYMBOL", "ETH")
 

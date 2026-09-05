@@ -85,7 +85,7 @@ def _get_v2(path: str) -> tuple[int | None, dict | list | None]:
     if not _gatekeeper():
         return None, None
     try:
-        resp = requests.get(base + path, timeout=5, headers=_HEADERS)
+        resp = requests.get(base + path, timeout=config.EXPLORER_TIMEOUT, headers=_HEADERS)
         if resp.status_code == 404:
             _record(True)      # a definitive answer, not a failure
             return 404, None
@@ -132,7 +132,7 @@ def _get(params: dict) -> dict | list | None:
     for attempt in range(2):
         try:
             resp = requests.get(config.EXPLORER_API_URL, params=params,
-                                timeout=5, headers=_HEADERS)
+                                timeout=config.EXPLORER_TIMEOUT, headers=_HEADERS)
             if 400 <= resp.status_code < 500:
                 # 4xx is a policy answer, not a transient fault — no retry
                 LAST_ERROR = (f"HTTP {resp.status_code} for "
