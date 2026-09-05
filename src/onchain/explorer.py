@@ -13,6 +13,46 @@ from . import config
 
 LAST_ERROR: str | None = None   # most recent request failure, for diagnostics
 
+# Be a polite client of a free public API, and fail FAST when it is unhappy:
+# a global min-gap between calls, and a circuit breaker that opens after
+# repeated transport failures so scans report "explorer unavailable" in
+# milliseconds instead of stacking 8-second timeouts per call.
+import threading as _threading
+_gate = _threading.Lock()
+_last_call = 0.0
+_fail_streak = 0
+_cooldown_until = 0.0
+_MIN_GAP = 0.25          # seconds between explorer calls, process-wide
+_BREAKER_THRESHOLD = 4   # consecutive transport failures to open
+_BREAKER_SECONDS = 300
+
+
+def _gatekeeper() -> bool:
+    """Throttle + breaker. False = breaker open, skip the call."""
+    global _last_call
+    with _gate:
+        if time.time() < _cooldown_until:
+            return False
+        wait = _MIN_GAP - (time.time() - _last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _last_call = time.time()
+        return True
+
+
+def _record(ok: bool) -> None:
+    global _fail_streak, _cooldown_until, LAST_ERROR
+    with _gate:
+        if ok:
+            _fail_streak = 0
+        else:
+            _fail_streak += 1
+            if _fail_streak >= _BREAKER_THRESHOLD:
+                _cooldown_until = time.time() + _BREAKER_SECONDS
+                LAST_ERROR = (f"cooling down {_BREAKER_SECONDS}s after "
+                              f"{_fail_streak} consecutive failures "
+                              f"(last: {LAST_ERROR})")
+
 # Explorer hosts behind Cloudflare bot protection 403 the default
 # python-requests User-Agent while serving browsers normally — identify as a
 # browser for this public read-only API.
@@ -42,15 +82,20 @@ def _get_v2(path: str) -> tuple[int | None, dict | list | None]:
     base = _v2_base()
     if not base:
         return None, None
+    if not _gatekeeper():
+        return None, None
     try:
-        resp = requests.get(base + path, timeout=8, headers=_HEADERS)
+        resp = requests.get(base + path, timeout=5, headers=_HEADERS)
         if resp.status_code == 404:
+            _record(True)      # a definitive answer, not a failure
             return 404, None
         resp.raise_for_status()
         LAST_ERROR = None
+        _record(True)
         return resp.status_code, resp.json()
     except (requests.RequestException, ValueError) as exc:
         LAST_ERROR = f"{type(exc).__name__}: {str(exc)[:160]}"
+        _record(False)
         return None, None
 
 
@@ -82,14 +127,17 @@ def _get(params: dict) -> dict | list | None:
     if config.EXPLORER_API_KEY:
         params = {**params, "apikey": config.EXPLORER_API_KEY}
     global LAST_ERROR
+    if not _gatekeeper():
+        return None
     for attempt in range(2):
         try:
             resp = requests.get(config.EXPLORER_API_URL, params=params,
-                                timeout=8, headers=_HEADERS)
+                                timeout=5, headers=_HEADERS)
             if 400 <= resp.status_code < 500:
                 # 4xx is a policy answer, not a transient fault — no retry
                 LAST_ERROR = (f"HTTP {resp.status_code} for "
                               f"{params.get('module')}/{params.get('action')}")
+                _record(False)
                 return None
             resp.raise_for_status()
             body = resp.json()
@@ -98,10 +146,12 @@ def _get(params: dict) -> dict | list | None:
             if isinstance(result, str) and "rate limit" in result.lower():
                 raise requests.RequestException(result)
             LAST_ERROR = None
+            _record(True)
             return result
         except (requests.RequestException, ValueError) as exc:
             LAST_ERROR = f"{type(exc).__name__}: {str(exc)[:160]}"
             if attempt >= 1:      # final attempt: fail fast, no pointless sleep
+                _record(False)
                 return None
             time.sleep(1)
     return None

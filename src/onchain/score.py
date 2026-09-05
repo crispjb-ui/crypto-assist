@@ -39,10 +39,11 @@ def evaluate(token: TokenInfo, launch: LaunchWindow | None,
     if token.source_verified is False:
         v.add(2, "contract source not verified", "unverified-source")
     elif token.source_verified is None:
-        from . import config as _cfg
+        from . import config as _cfg, explorer as _ex
         v.notes.append(
-            "explorer configured but source lookup failed — see the explorer "
-            "status in the dashboard header" if _cfg.EXPLORER_API_URL else
+            (f"explorer configured but source lookup failed "
+             f"({_ex.LAST_ERROR or 'unknown error'}) — treat source checks "
+             "as UNRESOLVED, not passed") if _cfg.EXPLORER_API_URL else
             "no explorer API configured — source verification not checked")
     if token.suspect_source_hits:
         v.add(1, "source contains: " + ", ".join(token.suspect_source_hits)
@@ -67,10 +68,11 @@ def evaluate(token: TokenInfo, launch: LaunchWindow | None,
             v.add(3, f"{len(biggest[1])} early buyers share funder {biggest[0]} "
                      f"({len(clusters.funding_clusters)} funding cluster(s) total)", "funding-cluster")
         elif not clusters.funding_traced:
-            from . import config as _cfg
+            from . import config as _cfg, explorer as _ex
             v.notes.append(
-                ("funding sources not traced — explorer configured but calls "
-                 "failed; see the explorer status in the dashboard header"
+                (f"funding sources NOT traced — explorer calls failed "
+                 f"({_ex.LAST_ERROR or 'unknown error'}); disperser/common-"
+                 "funder detection is blind for this scan"
                  if _cfg.EXPLORER_API_URL else
                  "funding sources not traced (no explorer API configured)")
                 + " — fresh-wallet nonce is the fallback signal")
