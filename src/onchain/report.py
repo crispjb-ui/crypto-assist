@@ -70,8 +70,10 @@ def collect(token: str, pair: str | None = None, bundle_only: bool = False,
     clusters = analyze_clusters(rpc, token, launch)
     holders = None
     if not bundle_only:
+        from .early_buyers import resolve_creation_block
         try:
-            token_deploy = rpc.find_deploy_block(token, hi=launch.window_end_block + 1)
+            token_deploy = resolve_creation_block(
+                rpc, token, hi=launch.window_end_block + 1)
         except RpcError:
             token_deploy = launch.creation_block
         holders = holder_stats(rpc, token, token_deploy, exclude={pair})

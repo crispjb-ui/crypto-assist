@@ -11,17 +11,17 @@ import requests
 
 from . import config
 
-_session = requests.Session()
-
 
 def _get(params: dict) -> dict | list | None:
+    # plain requests.get (no shared Session): callers parallelize these
+    # lookups across threads, and a Session is not guaranteed thread-safe.
     if not config.EXPLORER_API_URL:
         return None
     if config.EXPLORER_API_KEY:
         params = {**params, "apikey": config.EXPLORER_API_KEY}
     for attempt in range(3):
         try:
-            resp = _session.get(config.EXPLORER_API_URL, params=params, timeout=30)
+            resp = requests.get(config.EXPLORER_API_URL, params=params, timeout=20)
             resp.raise_for_status()
             body = resp.json()
             # Etherscan-compat: status "0" with "No transactions found" is a valid empty.
@@ -64,28 +64,47 @@ def funding_event(address: str) -> dict | None:
 
     The `from` of an internal transfer is the disperser/airdrop CONTRACT, not
     the human funder — callers resolve the true origin from the parent tx.
+    Cost control: the internal-transfer lookup (second HTTP call) runs only
+    when the wallet's FIRST external transaction isn't already an inbound
+    value transfer — a wallet whose very first tx is direct funding cannot
+    have been disperser-funded earlier than that.
     """
     addr = address.lower()
+    ext = first_transactions(address, limit=10)
     candidates: list[dict] = []
-    for tx in first_transactions(address, limit=10) or []:
+    first_ext_is_funding = False
+    for i, tx in enumerate(ext or []):
         try:
             if tx.get("to", "").lower() == addr and int(tx.get("value", "0")) > 0:
                 candidates.append({"from": tx.get("from", "").lower(),
                                    "hash": tx.get("hash"), "internal": False,
                                    "block": int(tx.get("blockNumber", "0"))})
+                if i == 0:
+                    first_ext_is_funding = True
         except (ValueError, AttributeError):
             continue
-    for tx in internal_transactions(address, limit=10) or []:
-        try:
-            if tx.get("to", "").lower() == addr and int(tx.get("value", "0")) > 0:
-                candidates.append({"from": tx.get("from", "").lower(),
-                                   "hash": tx.get("hash"), "internal": True,
-                                   "block": int(tx.get("blockNumber", "0"))})
-        except (ValueError, AttributeError):
-            continue
+    if not first_ext_is_funding:
+        for tx in internal_transactions(address, limit=10) or []:
+            try:
+                if tx.get("to", "").lower() == addr and int(tx.get("value", "0")) > 0:
+                    candidates.append({"from": tx.get("from", "").lower(),
+                                       "hash": tx.get("hash"), "internal": True,
+                                       "block": int(tx.get("blockNumber", "0"))})
+            except (ValueError, AttributeError):
+                continue
     if not candidates:
         return None
     return min(candidates, key=lambda c: c["block"])
+
+
+def contract_creation_tx(address: str) -> str | None:
+    """Creation tx hash via the explorer (1 call) — much cheaper than a
+    ~25-call deploy-block binary search. None when unavailable."""
+    result = _get({"module": "contract", "action": "getcontractcreation",
+                   "contractaddresses": address})
+    if isinstance(result, list) and result and isinstance(result[0], dict):
+        return result[0].get("txHash") or result[0].get("txhash")
+    return None
 
 
 def funding_source(address: str) -> str | None:

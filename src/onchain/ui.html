@@ -93,7 +93,7 @@
     <button class="action" id="go" type="submit">Scan</button>
   </form>
   <div id="result">Paste a contract address, or click one anywhere in the app.
-Full pipeline: contract flags, launch window, clusters, holders. 10–60s.</div>
+Full pipeline: contract flags, launch window, clusters, holders. Usually 10–30s.</div>
   <h2 style="margin-top:16px">Maintenance</h2>
   <div>
     <button class="job" data-job="wallets_scan">Ingest wallet PnL (24h)</button>
@@ -295,7 +295,7 @@ $("#watchonly").addEventListener("change", refresh);
 $("#scanform").addEventListener("submit", async e => {
   e.preventDefault();
   const btn = $("#go"); btn.disabled = true;
-  $("#result").textContent = "scanning… (RPC-heavy, 10–60s)";
+  $("#result").textContent = "scanning… (usually 10–30s)";
   try {
     const body = { token: $("#token").value.trim(),
                    pair: $("#pair").value.trim(),

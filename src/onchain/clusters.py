@@ -4,12 +4,19 @@ and offload detection (do the snipers still hold what they bought?).
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from . import config, explorer
 from .early_buyers import TRANSFER_TOPIC, LaunchWindow
-from .erc20 import balance_of
+from .erc20 import SEL_BALANCE_OF
 from .rpc import EvmRpc, RpcError
+
+# Funding traces are 1-2 explorer HTTP calls per wallet; run them in parallel
+# and only for the earliest buyers (where coordination shows). This is the
+# difference between a ~90s and a ~10s quick scan.
+FUNDING_TRACE_MAX = 20
+FUNDING_TRACE_WORKERS = 8
 
 
 @dataclass
@@ -87,13 +94,27 @@ def analyze_clusters(rpc: EvmRpc, token: str, launch: LaunchWindow,
     report = ClusterReport()
     launch_block = launch.creation_block
 
-    # Nonce at launch (historical state) — best effort, some RPCs prune it.
+    # Batched historical nonces and current balances — one round-trip each
+    # instead of a call per buyer.
     nonce_calls = [("eth_getTransactionCount", [b.wallet, hex(launch_block)])
                    for b in launch.buyers]
+    balance_calls = [
+        ("eth_call", [{"to": token, "data": SEL_BALANCE_OF
+                       + b.wallet.lower().replace("0x", "").rjust(64, "0")},
+                      "latest"])
+        for b in launch.buyers]
     nonces = rpc.batch(nonce_calls)
+    balances = rpc.batch(balance_calls)
+
+    # Parallel funding traces for the earliest buyers (explorer HTTP-bound).
+    traced = launch.buyers[:FUNDING_TRACE_MAX]
+    with ThreadPoolExecutor(max_workers=FUNDING_TRACE_WORKERS) as pool:
+        events = list(pool.map(
+            lambda b: explorer.funding_event(b.wallet), traced))
+    funding_by_wallet = {b.wallet: ev for b, ev in zip(traced, events)}
 
     by_funder: dict[str, list[str]] = defaultdict(list)
-    for buyer, nonce_hex in zip(launch.buyers, nonces):
+    for buyer, nonce_hex, bal_hex in zip(launch.buyers, nonces, balances):
         p = BuyerProfile(
             wallet=buyer.wallet,
             bought=buyer.bought,
@@ -104,7 +125,7 @@ def analyze_clusters(rpc: EvmRpc, token: str, launch: LaunchWindow,
             if p.nonce_at_launch <= fresh_nonce_max:
                 report.fresh_wallet_count += 1
 
-        ev = explorer.funding_event(buyer.wallet)
+        ev = funding_by_wallet.get(buyer.wallet)
         if ev is not None:
             report.funding_traced = True
             if ev.get("internal"):
@@ -114,7 +135,8 @@ def analyze_clusters(rpc: EvmRpc, token: str, launch: LaunchWindow,
             if funder:
                 by_funder[funder].append(buyer.wallet)
 
-        p.still_holds = balance_of(rpc, token, buyer.wallet)
+        if isinstance(bal_hex, str) and bal_hex not in ("", "0x"):
+            p.still_holds = int(bal_hex, 16)
         p.retention_pct = (100.0 * p.still_holds / buyer.bought) if buyer.bought else 0.0
         if buyer.bought and p.retention_pct < offload_retention_pct:
             report.offloaded_count += 1

@@ -17,6 +17,22 @@ def _topic_addr(address: str) -> str:
     return "0x" + address.lower().replace("0x", "").rjust(64, "0")
 
 
+def resolve_creation_block(rpc: EvmRpc, address: str,
+                           hi: int | None = None) -> int:
+    """Contract creation block — explorer lookup first (2 calls), deploy-block
+    binary search (~25 sequential calls) only as fallback."""
+    from . import explorer
+    txh = explorer.contract_creation_tx(address)
+    if txh:
+        try:
+            tx = rpc.call("eth_getTransactionByHash", [txh])
+            if isinstance(tx, dict) and tx.get("blockNumber"):
+                return int(tx["blockNumber"], 16)
+        except Exception:
+            pass
+    return rpc.find_deploy_block(address, hi=hi)
+
+
 @dataclass
 class EarlyBuyer:
     wallet: str
@@ -47,7 +63,7 @@ def analyze_launch(rpc: EvmRpc, token: str, pair: str,
         window_blocks = config.EARLY_WINDOW_BLOCKS or \
             rpc.blocks_for_seconds(config.EARLY_WINDOW_SECONDS)
     if creation_block is None:
-        creation_block = rpc.find_deploy_block(pair)
+        creation_block = resolve_creation_block(rpc, pair)
     end_block = creation_block + window_blocks
 
     logs = rpc.get_logs(
