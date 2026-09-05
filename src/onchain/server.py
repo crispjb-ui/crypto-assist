@@ -264,6 +264,24 @@ def scan_once() -> None:
 
 SETUPS_INTERVAL_SECONDS = 1800  # self-identifying setup sweep, every 30 min
 
+# Maintenance self-schedules — no button pressing required. Buttons remain for
+# manual re-runs; start_job dedupes if a run is still in flight.
+AUTO_JOBS_SECONDS = {
+    "wallets_scan": 6 * 3600,
+    "outcomes_update": 6 * 3600,
+}
+_auto_last: dict[str, float] = {}
+
+
+def _run_due_auto_jobs() -> None:
+    now = time.time()
+    for name, interval in AUTO_JOBS_SECONDS.items():
+        if now - _auto_last.get(name, 0.0) >= interval:
+            result = start_job(name)
+            if "started" in result:
+                _auto_last[name] = now
+                print(f"auto-maintenance: {name} started", flush=True)
+
 
 def scanner_loop() -> None:
     last_setups = 0.0
@@ -281,6 +299,10 @@ def scanner_loop() -> None:
             except Exception:
                 traceback.print_exc()
             last_setups = time.time()
+        try:
+            _run_due_auto_jobs()
+        except Exception:
+            traceback.print_exc()
         state["scanning"] = False
         time.sleep(SCAN_INTERVAL_SECONDS)
 

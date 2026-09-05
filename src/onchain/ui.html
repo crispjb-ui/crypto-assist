@@ -94,7 +94,9 @@
   </form>
   <div id="result">Paste a contract address, or click one anywhere in the app.
 Full pipeline: contract flags, launch window, clusters, holders. Usually 10–30s.</div>
-  <h2 style="margin-top:16px">Maintenance</h2>
+  <h2 style="margin-top:16px">Maintenance — runs automatically (buttons = re-run now)</h2>
+  <p class="detail">Wallet PnL and outcome labeling run every 6h, setup sweeps
+every 30min, all server-side — nothing to press.</p>
   <div>
     <button class="job" data-job="wallets_scan">Ingest wallet PnL (24h)</button>
     <button class="job" data-job="outcomes_update">Label outcomes now</button>
@@ -147,15 +149,35 @@ $$("nav button").forEach(b => b.onclick = () => {
 });
 
 // --- desktop alerts for smart-money buys ---
+// Default ON: auto-enables on load whenever permission was already granted.
+// The very first grant needs one click (browsers require a user gesture for
+// the permission prompt); after that, every page load starts with alerts on
+// unless the user turned them off (remembered per browser).
 let alertsOn = false;
 const notified = new Set();          // token -> already alerted
 let firstFeedLoaded = false;         // don't alert on the initial backlog
+function setAlerts(on) {
+  alertsOn = on && ("Notification" in window)
+                && Notification.permission === "granted";
+  $("#alerts").textContent = alertsOn ? "🔔 alerts: on"
+    : (("Notification" in window) && Notification.permission === "denied")
+      ? "🔔 alerts: blocked" : "🔔 alerts: off (click to enable)";
+  try { localStorage.setItem("alertsOff", alertsOn ? "" : "1"); } catch (e) {}
+}
 $("#alerts").onclick = async () => {
   if (!("Notification" in window)) { alert("This browser has no notifications."); return; }
+  if (alertsOn) { setAlerts(false); return; }          // toggle off
   if (Notification.permission !== "granted") await Notification.requestPermission();
-  alertsOn = Notification.permission === "granted";
-  $("#alerts").textContent = alertsOn ? "🔔 alerts: on" : "🔔 alerts: blocked";
+  setAlerts(true);
 };
+(() => {  // auto-on at load when already permitted and not opted out
+  let optedOut = false;
+  try { optedOut = localStorage.getItem("alertsOff") === "1"; } catch (e) {}
+  if (!optedOut && ("Notification" in window)
+      && Notification.permission === "granted") setAlerts(true);
+  else if (("Notification" in window) && Notification.permission === "default")
+    $("#alerts").textContent = "🔔 alerts: off (click to enable)";
+})();
 function maybeAlert(rows) {
   if (!alertsOn) return;
   for (const x of rows) {
