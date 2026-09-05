@@ -205,10 +205,14 @@ async function refresh() {
     if (d.last_error) $("#status").textContent += " — error: " + d.last_error;
     const only = $("#watchonly").checked;
     let rows = d.rows;
-    if (only) rows = rows.filter(x => x.cls !== "quiet" || x.smart > 0 || x.setup);
+    if (only) rows = rows.filter(x =>
+      x.cls === "watch" || x.smart > 0 || x.setup);   // candidates = never "bad"
+    const scoreTag = x => x.score == null ? ""
+      : ` <span class="${x.score >= 5 ? "score-bad" : x.score >= 2 ? "score-mid"
+                        : "score-ok"}">score ${x.score}</span>`;
     $("#feed tbody").innerHTML = rows.map((x, i) => `<tr>
       <td class="rank">#${i+1}<div class="detail">${x.opp ?? 0}</div></td>
-      <td class="sym">${esc(x.symbol)}${x.graduated ? ' <span class="grad">GRAD</span>':''}${x.setup ? ' <span class="grad">SETUP</span>':''}${x.smart ? ' <span class="smarttag">SMART x'+x.smart+'</span>':''}
+      <td class="sym">${esc(x.symbol)}${scoreTag(x)}${x.graduated ? ' <span class="grad">GRAD</span>':''}${x.setup ? ' <span class="grad">SETUP</span>':''}${x.smart ? ' <span class="smarttag">SMART x'+x.smart+'</span>':''}
           <div class="venue">${esc(x.venue)}</div></td>
       <td><span class="pill ${esc(x.cls)}">${esc(x.cls)}</span></td>
       <td><a class="ca" data-t="${esc(x.token)}" data-p="${esc(x.pair)}"

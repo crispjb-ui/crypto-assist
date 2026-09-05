@@ -97,6 +97,15 @@ def funding_event(address: str) -> dict | None:
     return min(candidates, key=lambda c: c["block"])
 
 
+def token_holder_list(contract: str, offset: int = 500) -> list[dict] | None:
+    """Top token holders via Blockscout's Etherscan-compatible endpoint —
+    one HTTP call vs replaying the token's whole Transfer history. None when
+    the explorer is unavailable or the action unsupported."""
+    result = _get({"module": "token", "action": "tokenholderlist",
+                   "contractaddress": contract, "page": 1, "offset": offset})
+    return result if isinstance(result, list) and result else None
+
+
 def contract_creation_tx(address: str) -> str | None:
     """Creation tx hash via the explorer (1 call) — much cheaper than a
     ~25-call deploy-block binary search. None when unavailable."""

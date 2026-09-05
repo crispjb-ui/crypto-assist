@@ -107,14 +107,52 @@ class EvmRpc:
 
     def get_logs(self, from_block: int, to_block: int, address: str | None = None,
                  topics: list[Any] | None = None) -> list[dict]:
-        """Chunked eth_getLogs; splits ranges the endpoint rejects. to_block is
-        clamped to the chain head — windows around very fresh launches otherwise
-        reach past it and providers reject the whole query ("Unknown block")."""
+        """Chunked eth_getLogs. to_block is clamped to the chain head — windows
+        around very fresh launches otherwise reach past it and providers reject
+        the whole query ("Unknown block"). Chunks are sent as JSON-RPC batches
+        (12 ranges per round trip) so long-history scans take seconds, not
+        minutes; a chunk the endpoint rejects falls back to sequential
+        range-shrinking for just that span."""
         to_block = min(to_block, self.latest_block())
         if from_block > to_block:
             return []
-        logs: list[dict] = []
         step = config.MAX_LOG_BLOCK_RANGE
+        ranges = []
+        start = from_block
+        while start <= to_block:
+            end = min(start + step - 1, to_block)
+            ranges.append((start, end))
+            start = end + 1
+
+        def _flt(s: int, e: int) -> dict[str, Any]:
+            f: dict[str, Any] = {"fromBlock": hex(s), "toBlock": hex(e)}
+            if address:
+                f["address"] = address
+            if topics:
+                f["topics"] = topics
+            return f
+
+        if len(ranges) == 1:
+            return self._get_logs_shrinking(ranges[0][0], ranges[0][1],
+                                            address, topics)
+        logs: list[dict] = []
+        group = 12
+        for i in range(0, len(ranges), group):
+            grp = ranges[i : i + group]
+            results = self.batch([("eth_getLogs", [_flt(s, e)]) for s, e in grp],
+                                 chunk=group)
+            for (s, e), res in zip(grp, results):
+                if isinstance(res, list):
+                    logs.extend(res)
+                else:  # rejected chunk: shrink just this span
+                    logs.extend(self._get_logs_shrinking(s, e, address, topics))
+        return logs
+
+    def _get_logs_shrinking(self, from_block: int, to_block: int,
+                            address: str | None, topics: list[Any] | None
+                            ) -> list[dict]:
+        logs: list[dict] = []
+        step = to_block - from_block + 1
         start = from_block
         while start <= to_block:
             end = min(start + step - 1, to_block)
@@ -129,7 +167,7 @@ class EvmRpc:
             except RpcError:
                 if step <= 100:
                     raise
-                step //= 4  # endpoint's range limit is smaller than ours; shrink
+                step //= 4  # endpoint's limit is smaller than ours; shrink
         return logs
 
     def get_block_time(self, block: int) -> int:

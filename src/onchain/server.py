@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import config
 from . import long as long_mod
-from . import outcomes, pons, report, setups, wallets
+from . import outcomes, pons, report, setups, store, wallets
 from .pons import block_near_time
 from .rpc import EvmRpc
 
@@ -246,6 +246,14 @@ def scan_once() -> None:
                        f"{l.offloaded_top}/10 top offloaded"
                        + (f" — SMART MONEY x{len(smart_hits)}" if smart_hits else "")),
         }
+
+    # attach the latest diligence score from the ledger, when one exists
+    try:
+        scores = store.latest_scores(list(rows))
+        for token, row in rows.items():
+            row["score"] = scores.get(token)
+    except Exception:
+        pass
 
     with state["lock"]:
         state["feed"].update(rows)
