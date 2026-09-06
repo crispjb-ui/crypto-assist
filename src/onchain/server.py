@@ -128,7 +128,8 @@ def _is_contract(address: str) -> bool:
         code = _code_rpc.get_code(a)
         result = bool(code and code != "0x")
     except Exception:
-        result = False
+        return False   # treat as EOA this time, but DON'T cache the failure —
+                       # a throttled lookup must not mislabel a contract forever
     _code_cache[a] = result
     return result
 
