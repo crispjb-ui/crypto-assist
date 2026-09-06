@@ -253,8 +253,44 @@ def evaluate(mint_info, launch: SolLaunch | None, holders: dict | None) -> Verdi
                  "holder can freeze any wallet's tokens (honeypot lever)",
               "sol-freeze-authority")
     if mint_info.has_extensions:
-        v.add(1, "Token-2022 with extensions — transfer fees/hooks possible, "
-                 "read the extension set manually", "sol-token2022-extensions")
+        m = mint_info
+        if m.permanent_delegate:
+            v.add(3, f"PERMANENT DELEGATE ({m.permanent_delegate}) — can "
+                     "seize tokens from ANY holder's wallet, including yours",
+                  "sol-permanent-delegate")
+        if m.transfer_hook_program:
+            v.add(3, f"transfer hook program {m.transfer_hook_program} runs "
+                     "on every transfer — it can block sells (honeypot lever)",
+                  "sol-transfer-hook")
+        if m.non_transferable:
+            v.add(3, "NON-TRANSFERABLE (soulbound) — cannot be sold or moved",
+                  "sol-non-transferable")
+        if m.default_state_frozen:
+            v.add(2, "new token accounts start FROZEN — the authority must "
+                     "thaw each buyer before they can move tokens",
+                  "sol-default-frozen")
+        if m.transfer_fee_bps:
+            v.add(2, f"transfer fee {m.transfer_fee_bps / 100:.2f}% on every "
+                     f"transfer (cap {m.transfer_fee_max} raw units)"
+                     + (f"; authority {m.transfer_fee_authority} can change it"
+                        if m.transfer_fee_authority else "; fee is immutable"),
+                  "sol-transfer-fee")
+        elif m.transfer_fee_bps == 0 and m.transfer_fee_authority:
+            v.add(1, "transfer-fee config present at 0% — authority "
+                     f"{m.transfer_fee_authority} can raise it later",
+                  "sol-transfer-fee-armed")
+        if m.interest_bearing:
+            v.add(1, "interest-bearing display — shown balances rebase",
+                  "sol-interest-bearing")
+        if m.close_authority:
+            v.add(1, "mint close authority set", "sol-mint-close-authority")
+        scored = {"permanent-delegate", "transfer-hook", "non-transferable",
+                  "default-account-state", "transfer-fee-config",
+                  "interest-bearing", "mint-close-authority"}
+        benign = [e for e in m.extensions if e not in scored]
+        if benign:
+            v.notes.append("other Token-2022 extensions present (no risk "
+                           "scored): " + ", ".join(benign))
 
     if launch is None or not launch.history_complete:
         v.notes.append("pool history too deep to page to creation — launch "
@@ -358,7 +394,8 @@ def collect(mint: str, log: bool = True) -> dict:
                   "decimals": mint_info.decimals,
                   "mint_authority": mint_info.mint_authority,
                   "freeze_authority": mint_info.freeze_authority,
-                  "token_2022": mint_info.is_token_2022},
+                  "token_2022": mint_info.is_token_2022,
+                  "extensions": mint_info.extensions},
         "pair": pool, "market": market,
         "launch": asdict(launch) if launch else None,
         "holders": holders,
@@ -392,6 +429,8 @@ def render_text(d: dict) -> str:
            "mint authority: " + (t.get("mint_authority") or "revoked (supply fixed)"),
            "freeze authority: " + (t.get("freeze_authority")
                                    or "revoked (accounts unfreezable)"),
+           *(["token-2022 extensions: " + ", ".join(t["extensions"])]
+             if t.get("extensions") else []),
            "",
            f"score {v['score']} — {d['verdict_line']}", ""]
     out += [f"[+{f['points']}] {f['label']}" for f in v["flags"]]
