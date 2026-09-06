@@ -44,6 +44,7 @@ KNOWN_VENUE_PROGRAMS = {
     "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA": "PumpSwap",
     "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": "Raydium AMM v4",
     "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C": "Raydium CPMM",
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK": "Raydium CLMM",
 }
 
 
@@ -386,6 +387,11 @@ def render_text(d: dict) -> str:
               if d['market'].get('quoteSymbol') else ""),
            f"price ${d['market'].get('priceUsd')}  "
            f"liquidity ${((d['market'].get('liquidity') or {}).get('usd'))}",
+           # state the measured authority facts even when clean — a silent
+           # absence of flags is not the same as showing what was checked
+           "mint authority: " + (t.get("mint_authority") or "revoked (supply fixed)"),
+           "freeze authority: " + (t.get("freeze_authority")
+                                   or "revoked (accounts unfreezable)"),
            "",
            f"score {v['score']} — {d['verdict_line']}", ""]
     out += [f"[+{f['points']}] {f['label']}" for f in v["flags"]]
