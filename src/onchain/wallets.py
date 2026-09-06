@@ -158,20 +158,22 @@ def scan(hours: float, limit: int, activity_hours: float = 2.0) -> None:
               file=sys.stderr)
 
 
-def leaderboard(min_tokens: int = SMART_MIN_TOKENS) -> list[dict]:
+def leaderboard(min_tokens: int = SMART_MIN_TOKENS,
+                chain: str | None = None) -> list[dict]:
     """Win rate is unitless and aggregates across venues; realized PnL is only
-    meaningful per quote currency (ETH for Pons, stock tokens for Long) and is
-    therefore reported per quote, never summed across them."""
-    from . import config
+    meaningful per quote currency (ETH for Pons, stock tokens for Long, SOL or
+    the paired token on Solana) and is therefore reported per quote, never
+    summed across them. `chain` selects whose ledger rows count."""
+    sql, key = store.chain_clause(chain)
     with store.connect() as conn:
         rows = conn.execute(
             "SELECT wallet, quote_symbol, COUNT(*) AS tokens, "
             "SUM(received - spent) AS realized, "
             "SUM(CASE WHEN received > spent THEN 1 ELSE 0 END) AS wins, "
             "SUM(trades) AS trades "
-            "FROM wallet_trades WHERE (chain = ? OR chain = '') "
+            f"FROM wallet_trades WHERE {sql} "
             "GROUP BY wallet, quote_symbol",
-            (config.CHAIN_KEY,),
+            (key,),
         ).fetchall()
     per_wallet: dict[str, dict] = {}
     for (w, q, t, r, wi, tr) in rows:
@@ -192,7 +194,8 @@ def leaderboard(min_tokens: int = SMART_MIN_TOKENS) -> list[dict]:
 
 def smart_candidates(min_tokens: int = SMART_MIN_TOKENS,
                      min_win_rate: float = SMART_MIN_WIN_RATE,
-                     min_realized: float = SMART_MIN_REALIZED_QUOTE) -> set[str]:
+                     min_realized: float = SMART_MIN_REALIZED_QUOTE,
+                     chain: str | None = None) -> set[str]:
     """Wallets passing the PnL bar alone: enough sample, real win rate, no
     net-losing book in any quote, meaningful realized total in at least one.
     Quote units are not comparable across currencies (0.5 ETH != 0.5 NVDA) —
@@ -200,7 +203,7 @@ def smart_candidates(min_tokens: int = SMART_MIN_TOKENS,
     Passing this bar does NOT make a wallet smart — cohort detection below
     decides whether the wins belong to a trader or to an operator's cohort."""
     out = set()
-    for e in leaderboard(min_tokens):
+    for e in leaderboard(min_tokens, chain=chain):
         by_q = e["realized_by_quote"]
         if (e["win_rate"] >= min_win_rate
                 and all(v >= 0 for v in by_q.values())
@@ -209,7 +212,8 @@ def smart_candidates(min_tokens: int = SMART_MIN_TOKENS,
     return out
 
 
-def detect_cohorts(candidates: set[str]) -> dict[str, int]:
+def detect_cohorts(candidates: set[str],
+                   chain: str | None = None) -> dict[str, int]:
     """wallet -> cohort size, for candidates that share an operator signature:
     same funding source, same vanity prefix, or near-identical portfolio.
     Wallets absent from the result showed none of the three signatures —
@@ -233,7 +237,7 @@ def detect_cohorts(candidates: set[str]) -> dict[str, int]:
     # (1) shared funder — proof-grade even for 2 wallets, except high-fanout
     # funders (CEX/bridge infrastructure funds strangers too)
     by_funder: dict[str, list[str]] = defaultdict(list)
-    for w, f in store.wallet_funder_map().items():
+    for w, f in store.wallet_funder_map(chain=chain).items():
         if f and w in parent:
             by_funder[f].append(w)
     for group in by_funder.values():
@@ -241,17 +245,20 @@ def detect_cohorts(candidates: set[str]) -> dict[str, int]:
             for w in group[1:]:
                 union(group[0], w)
 
-    # (2) shared vanity prefix
+    # (2) shared vanity prefix (0x stripped on EVM; base58 compared verbatim —
+    # vanity generators grind leading characters on both chains)
     by_prefix: dict[str, list[str]] = defaultdict(list)
     for w in wallets_list:
-        by_prefix[w[2:2 + PREFIX_HEX_CHARS]].append(w)
+        head = w[2:2 + PREFIX_HEX_CHARS] if w.startswith("0x") \
+            else w[:PREFIX_HEX_CHARS]
+        by_prefix[head].append(w)
     for group in by_prefix.values():
         if len(group) >= COHORT_MIN_PREFIX:
             for w in group[1:]:
                 union(group[0], w)
 
     # (3) near-identical traded-token sets
-    tok = store.wallet_token_sets(wallets_list)
+    tok = store.wallet_token_sets(wallets_list, chain=chain)
     eligible = [w for w in wallets_list
                 if len(tok.get(w, ())) >= COHORT_MIN_PORTFOLIO]
     for i, a in enumerate(eligible):
@@ -269,16 +276,17 @@ def detect_cohorts(candidates: set[str]) -> dict[str, int]:
 
 def smart_set(min_tokens: int = SMART_MIN_TOKENS,
               min_win_rate: float = SMART_MIN_WIN_RATE,
-              min_realized: float = SMART_MIN_REALIZED_QUOTE) -> set[str]:
+              min_realized: float = SMART_MIN_REALIZED_QUOTE,
+              chain: str | None = None) -> set[str]:
     """Independent winners only: the PnL bar minus operator cohorts."""
-    cands = smart_candidates(min_tokens, min_win_rate, min_realized)
-    return cands - set(detect_cohorts(cands))
+    cands = smart_candidates(min_tokens, min_win_rate, min_realized, chain=chain)
+    return cands - set(detect_cohorts(cands, chain=chain))
 
 
-def cohort_set() -> set[str]:
+def cohort_set(chain: str | None = None) -> set[str]:
     """Profitable wallets carrying an operator-cohort signature. On the feed
     these are an insider warning, not a follow signal."""
-    return set(detect_cohorts(smart_candidates()))
+    return set(detect_cohorts(smart_candidates(chain=chain), chain=chain))
 
 
 def trace_funders(limit: int = 150) -> int:

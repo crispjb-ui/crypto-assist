@@ -80,9 +80,20 @@ def _probe_entrypoints_job() -> None:
             state["entrypoints"][f"{e['entrypoint']} {e['selector']}"] = e
 
 
+def _wallets_scan_job() -> None:
+    wallets.scan(hours=24, limit=150)
+    try:                       # solana cohort evidence rides the same job
+        from ..solana import feed as sol_feed
+        traced = sol_feed.trace_smart_funders()
+        if traced:
+            print(f"solana: funding-traced {traced} smart candidate(s)",
+                  flush=True)
+    except Exception:
+        traceback.print_exc()
+
+
 JOBS = {
-    "wallets_scan": ("Ingest wallet PnL (24h)",
-                     lambda: wallets.scan(hours=24, limit=150)),
+    "wallets_scan": ("Ingest wallet PnL (24h)", _wallets_scan_job),
     "outcomes_update": ("Label outcomes now",
                         lambda: outcomes.cmd_update(min_age_hours=20.0)),
     "setups_scan": ("Scan accumulation setups", _setups_job),
@@ -294,10 +305,21 @@ def scan_once() -> None:
                        + (f" — SMART MONEY x{len(smart_hits)}" if smart_hits else "")),
         }
 
+    # solana live launch feed — merged into the same ranked list (guarded:
+    # no-op without SOLANA_RPC_URL; a solana failure never breaks the EVM feed)
+    try:
+        from ..solana import feed as sol_feed
+        rows.update(sol_feed.scan(opportunity))
+    except Exception:
+        traceback.print_exc()
+
     # attach the latest diligence score from the ledger, when one exists,
     # and fold it into the ranking (a scanned-AVOID token must not rank #1)
     try:
-        scores = store.latest_scores(list(rows))
+        evm = [t for t in rows if t.startswith("0x")]
+        sol = [t for t in rows if not t.startswith("0x")]
+        scores = store.latest_scores(evm)
+        scores.update(store.latest_scores(sol, chain="solana"))
         for token, row in rows.items():
             row["score"] = scores.get(token)
     except Exception:
@@ -405,47 +427,63 @@ class Handler(BaseHTTPRequestHandler):
                                  "explorer": state["explorer"]})
         elif self.path.startswith("/api/wallets"):
             try:
-                everyone = wallets.leaderboard(min_tokens=1)
-                # Headline wallets with a real sample (>=2 tokens); a single
-                # 100%-win launch is survivorship noise, not an edge.
-                repeat = [e for e in everyone if e["tokens"] >= 2]
-                # Drop contract addresses (routers/helpers route everyone's
-                # trades and are not traders). Verified by code check, cached.
-                traders, contracts = [], 0
-                for e in repeat:
-                    if _is_contract(e["wallet"]):
-                        contracts += 1
-                    else:
-                        traders.append(e)
-                smart = wallets.smart_set()
-                cohorts = wallets.detect_cohorts(wallets.smart_candidates())
-                for e in traders:
-                    e["smart"] = e["wallet"] in smart and not _is_contract(e["wallet"])
-                    e["cohort"] = cohorts.get(e["wallet"], 0)
-                # display-only USD conversion at CURRENT DexScreener prices;
-                # unpriced quotes are named, never silently dropped
-                quote_syms = sorted({q for e in traders
-                                     for q in e["realized_by_quote"]})
-                try:
-                    px = prices.quote_prices_usd(quote_syms)
-                except Exception:
-                    px = {}
-                for e in traders:
-                    usd, unpriced = prices.usd_realized(
-                        e["realized_by_quote"], px)
-                    e["usd_realized"] = round(usd, 2) if usd is not None else None
-                    e["usd_unpriced"] = unpriced
+                everyone, traders, contracts = [], [], 0
+                # per-chain: leaderboard, smart bar, cohorts, USD pricing —
+                # never mixed (chain='solana' for sol; contract filtering is
+                # EVM-only: solana fee payers are user wallets, not programs)
+                chains = [("evm", None, None, None)]
+                import os as _os
+                if _os.environ.get("SOLANA_RPC_URL"):
+                    chains.append(("sol", "solana", "solana", "solana"))
+                for tag, chain, dex_chain, store_chain in chains:
+                    board = wallets.leaderboard(min_tokens=1, chain=chain)
+                    everyone.extend(board)
+                    # Headline wallets with a real sample (>=2 tokens); a
+                    # single 100%-win launch is survivorship noise.
+                    repeat = [e for e in board if e["tokens"] >= 2]
+                    kept = []
+                    for e in repeat:
+                        if tag == "evm" and _is_contract(e["wallet"]):
+                            contracts += 1
+                        else:
+                            e["chain"] = tag
+                            kept.append(e)
+                    smart = wallets.smart_set(chain=chain)
+                    cohorts = wallets.detect_cohorts(
+                        wallets.smart_candidates(chain=chain), chain=chain)
+                    quote_syms = sorted({q for e in kept
+                                         for q in e["realized_by_quote"]})
+                    try:
+                        px = prices.quote_prices_usd(
+                            quote_syms, dex_chain=dex_chain,
+                            store_chain=store_chain)
+                    except Exception:
+                        px = {}
+                    for e in kept:
+                        e["smart"] = e["wallet"] in smart
+                        e["cohort"] = cohorts.get(e["wallet"], 0)
+                        usd, unpriced = prices.usd_realized(
+                            e["realized_by_quote"], px)
+                        e["usd_realized"] = (round(usd, 2)
+                                             if usd is not None else None)
+                        e["usd_unpriced"] = unpriced
+                    traders.extend(kept)
                 traders.sort(key=lambda e: (-e["win_rate"],
                                             -(e["usd_realized"] or 0)))
+                funders_traced = len(store.wallet_funder_map())
+                try:
+                    funders_traced += len(store.wallet_funder_map(chain="solana"))
+                except Exception:
+                    pass
                 self._json(200, {
                     "rows": traders[:100],
-                    "quote_prices_usd": px,
                     "smart_count": sum(1 for e in traders if e["smart"]),
                     "cohort_wallet_count": sum(1 for e in traders if e["cohort"]),
-                    "funders_traced": len(store.wallet_funder_map()),
+                    "funders_traced": funders_traced,
                     "repeat_wallet_count": len(traders),
                     "total_tracked": len(everyone),
-                    "single_launch_count": len(everyone) - len(repeat),
+                    "single_launch_count": len(everyone) - len(traders)
+                                           - contracts,
                     "contracts_excluded": contracts,
                 })
             except Exception as exc:

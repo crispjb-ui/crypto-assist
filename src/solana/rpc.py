@@ -40,6 +40,11 @@ class SolRpc:
         self._session = requests.Session()
         self._id = 0
 
+    def clone(self) -> "SolRpc":
+        """Fresh session for a worker thread (requests.Session is not
+        thread-safe to share)."""
+        return SolRpc(self.url)
+
     def call(self, method: str, params: list):
         self._id += 1
         body = {"jsonrpc": "2.0", "id": self._id, "method": method,

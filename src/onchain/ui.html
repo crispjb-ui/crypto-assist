@@ -283,7 +283,7 @@ async function loadWallets() {
     `<tr><th>wallet</th><th>tokens</th><th>wins</th><th>win rate</th>
      <th>realized</th><th>≈ USD now</th><th></th></tr>` +
     (rows.map(r => `<tr>
-      <td>${esc(r.wallet)}</td><td>${r.tokens}</td><td>${r.wins}</td>
+      <td>${esc(r.wallet)}${r.chain === "sol" ? ' <span class="venue">sol</span>' : ""}</td><td>${r.tokens}</td><td>${r.wins}</td>
       <td>${Math.round(r.win_rate*100)}%</td>
       <td>${esc(Object.entries(r.realized_by_quote || {})
             .map(([q,v]) => (v>=0?"+":"") + v.toFixed(3) + " " + q).join(", "))}</td>

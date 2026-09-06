@@ -23,7 +23,7 @@ _CACHE_SECONDS = 300
 # chain -> (fetched_at, prices, symbols already attempted this window)
 _cache: dict[str, tuple[float, dict[str, float], set[str]]] = {}
 
-NATIVE_SYMBOLS = {"ETH", "WETH", "BNB", "WBNB"}
+NATIVE_SYMBOLS = {"ETH", "WETH", "BNB", "WBNB", "SOL", "WSOL"}
 
 
 def _price_from_pair(pair: dict) -> float | None:
@@ -44,7 +44,8 @@ def _native_usd_from_pair(pair: dict) -> float | None:
         return None
 
 
-def _resolve_symbol(symbol: str, chain: str) -> str | None:
+def _resolve_symbol(symbol: str, chain: str,
+                    store_chain: str | None = None) -> str | None:
     """One-time search fallback for quote symbols recorded before addresses
     were kept. Exact base-symbol match on this chain, highest liquidity."""
     try:
@@ -63,14 +64,18 @@ def _resolve_symbol(symbol: str, chain: str) -> str | None:
                key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
     addr = (best.get("baseToken") or {}).get("address")
     if addr:
-        store.remember_quote_token(symbol, addr)  # resolve once, keep forever
+        store.remember_quote_token(symbol, addr,   # resolve once, keep forever
+                                   chain=store_chain)
     return addr
 
 
-def quote_prices_usd(symbols: list[str]) -> dict[str, float]:
+def quote_prices_usd(symbols: list[str], dex_chain: str | None = None,
+                     store_chain: str | None = None) -> dict[str, float]:
     """Current USD price per quote symbol. Missing keys = unpriced (no
-    address known and search found no exact match on this chain)."""
-    chain = config.DEXSCREENER_CHAIN_ID
+    address known and search found no exact match on this chain).
+    dex_chain = DexScreener slug (default: configured EVM chain);
+    store_chain = quote_tokens ledger namespace for address lookups."""
+    chain = dex_chain or config.DEXSCREENER_CHAIN_ID
     if not chain:
         return {}
     now = time.time()
@@ -79,13 +84,13 @@ def quote_prices_usd(symbols: list[str]) -> dict[str, float]:
             and set(symbols) <= cached[2]:
         return cached[1]
 
-    known = store.quote_token_map()
+    known = store.quote_token_map(chain=store_chain)
     prices: dict[str, float] = {}
     native_usd: float | None = None
     for sym in dict.fromkeys(symbols):
         if sym in NATIVE_SYMBOLS:
             continue                      # priced from any pair's ratio below
-        addr = known.get(sym) or _resolve_symbol(sym, chain)
+        addr = known.get(sym) or _resolve_symbol(sym, chain, store_chain)
         if not addr:
             continue
         try:

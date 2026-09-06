@@ -74,23 +74,41 @@ def _chain_filter(column: str = "chain") -> str:
     return f"({column} = ? OR {column} = '')"
 
 
-def wallet_scan_done(token: str) -> bool:
+def chain_clause(chain: str | None, column: str = "chain") -> tuple[str, str]:
+    """(sql, param) selecting one chain's rows. Legacy '' rows all came from
+    the original single-chain (EVM) install, so they count as the configured
+    EVM chain only — never as an explicitly named other chain (solana)."""
+    key = chain or config.CHAIN_KEY
+    if key == config.CHAIN_KEY:
+        return _chain_filter(column), key
+    return f"{column} = ?", key
+
+
+def _key(addr: str) -> str:
+    """Normalize an address for keying: EVM lowercases; base58 stays as-is
+    (Solana addresses are case-sensitive)."""
+    return addr.lower() if addr.startswith("0x") else addr
+
+
+def wallet_scan_done(token: str, chain: str | None = None) -> bool:
+    sql, key = chain_clause(chain)
     with connect() as conn:
         return conn.execute(
-            f"SELECT 1 FROM wallet_scans WHERE token = ? AND {_chain_filter()}",
-            (token.lower(), config.CHAIN_KEY)).fetchone() is not None
+            f"SELECT 1 FROM wallet_scans WHERE token = ? AND {sql}",
+            (_key(token), key)).fetchone() is not None
 
 
-def mark_wallet_scan(token: str) -> None:
+def mark_wallet_scan(token: str, chain: str | None = None) -> None:
     with connect() as conn:
         conn.execute("INSERT OR REPLACE INTO wallet_scans (token, ts, chain) "
                      "VALUES (?, strftime('%s','now'), ?)",
-                     (token.lower(), config.CHAIN_KEY))
+                     (_key(token), chain or config.CHAIN_KEY))
 
 
 def upsert_wallet_trade(wallet: str, token: str, spent: float,
                         received: float, trades: int,
-                        quote_symbol: str = "ETH") -> None:
+                        quote_symbol: str = "ETH",
+                        chain: str | None = None) -> None:
     with connect() as conn:
         conn.execute(
             "INSERT INTO wallet_trades (wallet, token, spent, received, trades, "
@@ -99,64 +117,68 @@ def upsert_wallet_trade(wallet: str, token: str, spent: float,
             "ON CONFLICT(wallet, token) DO UPDATE SET "
             "spent = spent + excluded.spent, received = received + excluded.received, "
             "trades = trades + excluded.trades, last_ts = excluded.last_ts",
-            (wallet.lower(), token.lower(), spent, received, trades,
-             quote_symbol, config.CHAIN_KEY),
+            (_key(wallet), _key(token), spent, received, trades,
+             quote_symbol, chain or config.CHAIN_KEY),
         )
 
 
 def remember_wallet_funder(wallet: str, funder: str,
-                           via_contract: bool = False) -> None:
+                           via_contract: bool = False,
+                           chain: str | None = None) -> None:
     """Record a wallet's first funding source ('' = traced, none found —
     bridged-in). Only successful traces are stored; explorer failures are not."""
     with connect() as conn:
         conn.execute("INSERT OR REPLACE INTO wallet_funders "
                      "(wallet, chain, funder, via_contract) VALUES (?,?,?,?)",
-                     (wallet.lower(), config.CHAIN_KEY, funder.lower(),
+                     (_key(wallet), chain or config.CHAIN_KEY, _key(funder),
                       int(via_contract)))
 
 
-def wallet_funder_map() -> dict[str, str]:
-    """wallet -> funder for the current chain (only traced wallets appear)."""
+def wallet_funder_map(chain: str | None = None) -> dict[str, str]:
+    """wallet -> funder for one chain (only traced wallets appear)."""
     with connect() as conn:
         rows = conn.execute(
             "SELECT wallet, funder FROM wallet_funders WHERE chain = ?",
-            (config.CHAIN_KEY,)).fetchall()
+            (chain or config.CHAIN_KEY,)).fetchall()
     return dict(rows)
 
 
-def wallet_token_sets(wallets_list: list[str]) -> dict[str, set[str]]:
+def wallet_token_sets(wallets_list: list[str],
+                      chain: str | None = None) -> dict[str, set[str]]:
     """wallet -> set of tokens traded, for portfolio-overlap comparison."""
     if not wallets_list:
         return {}
+    sql, key = chain_clause(chain)
     marks = ",".join("?" * len(wallets_list))
     with connect() as conn:
         rows = conn.execute(
             f"SELECT wallet, token FROM wallet_trades WHERE wallet IN ({marks}) "
-            f"AND {_chain_filter()}",
-            (*[w.lower() for w in wallets_list], config.CHAIN_KEY)).fetchall()
+            f"AND {sql}",
+            (*[_key(w) for w in wallets_list], key)).fetchall()
     out: dict[str, set[str]] = {}
     for w, t in rows:
         out.setdefault(w, set()).add(t)
     return out
 
 
-def remember_quote_token(symbol: str, address: str) -> None:
-    """Record which token address a quote symbol refers to on this chain, so
+def remember_quote_token(symbol: str, address: str,
+                         chain: str | None = None) -> None:
+    """Record which token address a quote symbol refers to on one chain, so
     realized PnL can later be priced in USD without guessing from the symbol."""
     if not symbol or not address:
         return
     with connect() as conn:
         conn.execute("INSERT OR REPLACE INTO quote_tokens (symbol, chain, "
                      "address) VALUES (?,?,?)",
-                     (symbol, config.CHAIN_KEY, address.lower()))
+                     (symbol, chain or config.CHAIN_KEY, _key(address)))
 
 
-def quote_token_map() -> dict[str, str]:
-    """symbol -> token address for the current chain."""
+def quote_token_map(chain: str | None = None) -> dict[str, str]:
+    """symbol -> token address for one chain."""
     with connect() as conn:
         rows = conn.execute(
             "SELECT symbol, address FROM quote_tokens WHERE chain = ?",
-            (config.CHAIN_KEY,)).fetchall()
+            (chain or config.CHAIN_KEY,)).fetchall()
     return dict(rows)
 
 
@@ -218,16 +240,17 @@ def record_outcome(run_id: int, status: str, price_usd: float | None,
         )
 
 
-def latest_scores(tokens: list[str]) -> dict[str, int]:
-    """Most recent diligence score per token (current chain), for cross-checks."""
+def latest_scores(tokens: list[str], chain: str | None = None) -> dict[str, int]:
+    """Most recent diligence score per token (one chain), for cross-checks."""
     if not tokens:
         return {}
+    sql, key = chain_clause(chain)
     marks = ",".join("?" * len(tokens))
     with connect() as conn:
         rows = conn.execute(
             f"SELECT token, score FROM runs WHERE token IN ({marks}) "
-            f"AND {_chain_filter()} ORDER BY ts",
-            (*[t.lower() for t in tokens], config.CHAIN_KEY),
+            f"AND {sql} ORDER BY ts",
+            (*[_key(t) for t in tokens], key),
         ).fetchall()
     return {t: s for t, s in rows}
 

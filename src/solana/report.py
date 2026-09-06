@@ -83,6 +83,33 @@ class SolLaunch:
     buyers: list[SolBuyer] = field(default_factory=list)
     creation_slot_buyers: int = 0
     sells_in_window: int = 0
+    # wallet -> [quote_spent, quote_received, trades] in QUOTE units — feeds
+    # the smart-wallet ledger without refetching a single transaction
+    wallet_trades: dict = field(default_factory=dict)
+
+
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+
+
+def _quote_units(tx: dict, quote_mint: str, owner: str) -> float:
+    """Signed quote-token delta for `owner`, in ui units (entry decimals)."""
+    meta = tx.get("meta") or {}
+    def total(entries):
+        s = 0.0
+        for e in entries or []:
+            if e.get("mint") == quote_mint and e.get("owner") == owner:
+                ui = e["uiTokenAmount"]
+                s += int(ui["amount"]) / 10 ** int(ui.get("decimals") or 0)
+        return s
+    return total(meta.get("postTokenBalances")) - total(meta.get("preTokenBalances"))
+
+
+def _sol_received(tx: dict) -> float:
+    meta = tx.get("meta") or {}
+    pre, post = meta.get("preBalances") or [], meta.get("postBalances") or []
+    if not pre or not post:
+        return 0.0
+    return max(0.0, (post[0] - pre[0]) / LAMPORTS)
 
 
 def _fee_payer(tx: dict) -> str | None:
@@ -110,7 +137,8 @@ def _sol_spent(tx: dict) -> float:
     return max(0.0, (pre[0] - post[0]) / LAMPORTS)
 
 
-def analyze_launch(rpc: SolRpc, mint: str, pool: str) -> SolLaunch:
+def analyze_launch(rpc: SolRpc, mint: str, pool: str,
+                   quote_mint: str | None = None) -> SolLaunch:
     venue_map = _venues()
     pool_acc = rpc.account_info(pool) or {}
     prog = pool_acc.get("owner", "")
@@ -133,6 +161,7 @@ def analyze_launch(rpc: SolRpc, mint: str, pool: str) -> SolLaunch:
     early = early[: config.MAX_EARLY_BUYERS * 2]
     txs = rpc.transactions([s["signature"] for s in early])
 
+    use_native = not quote_mint or quote_mint == WSOL_MINT
     seen: dict[str, SolBuyer] = {}
     for sig, tx in zip(early, txs):
         if not tx or (tx.get("meta") or {}).get("err"):
@@ -149,45 +178,73 @@ def analyze_launch(rpc: SolRpc, mint: str, pool: str) -> SolLaunch:
                     seconds_after_creation=float(
                         (sig.get("blockTime") or 0) - launch.creation_time),
                     sol_spent=0.0, tokens_bought=0)
-            b.sol_spent += _sol_spent(tx)
+            spent = (_sol_spent(tx) if use_native
+                     else max(0.0, -_quote_units(tx, quote_mint, payer)))
+            b.sol_spent += spent
             b.tokens_bought += delta
+            wt = launch.wallet_trades.setdefault(payer, [0.0, 0.0, 0])
+            wt[0] += spent
+            wt[2] += 1
         elif delta < 0:
             launch.sells_in_window += 1
+            recv = (_sol_received(tx) if use_native
+                    else max(0.0, _quote_units(tx, quote_mint, payer)))
+            wt = launch.wallet_trades.setdefault(payer, [0.0, 0.0, 0])
+            wt[1] += recv
+            wt[2] += 1
     launch.buyers = sorted(seen.values(), key=lambda b: b.slot)
     launch.creation_slot_buyers = sum(
         1 for b in launch.buyers if b.slot == launch.creation_slot)
     return launch
 
 
-def trace_buyers(rpc: SolRpc, launch: SolLaunch, mint: str) -> None:
-    """Fresh-wallet, funding-source, and offload facts per early buyer."""
-    for b in launch.buyers[: config.MAX_EARLY_BUYERS]:
-        try:
-            page = rpc.signatures(b.wallet, limit=1000)
-        except Exception:
-            continue
+def _trace_one(rpc: SolRpc, b: SolBuyer, mint: str, creation_time: int) -> None:
+    """Fresh-wallet, funding-source, and offload facts for one buyer."""
+    try:
+        page = rpc.signatures(b.wallet, limit=1000)
+    except Exception:
+        page = None
+    if page is not None:
         if len(page) >= 1000:
             b.prior_txs = 1000           # established wallet — not fresh,
-            continue                     # funding hop is old news, skip
-        b.prior_txs = sum(1 for s in page
-                          if (s.get("blockTime") or 0) < launch.creation_time)
-        earliest = page[-1]["signature"] if page else None
-        if earliest:
-            try:
-                tx = rpc.transactions([earliest])[0]
-            except Exception:
-                tx = None
-            if tx:
-                b.funder = _inbound_funder(tx, b.wallet)
-    # offload — current balance vs bought
-    for b in launch.buyers[: config.MAX_EARLY_BUYERS]:
-        if b.tokens_bought <= 0:
-            continue
+        else:                            # funding hop is old news
+            b.prior_txs = sum(1 for s in page
+                              if (s.get("blockTime") or 0) < creation_time)
+            earliest = page[-1]["signature"] if page else None
+            if earliest:
+                try:
+                    tx = rpc.transactions([earliest])[0]
+                except Exception:
+                    tx = None
+                if tx:
+                    b.funder = _inbound_funder(tx, b.wallet)
+    if b.tokens_bought > 0:
         try:
             bal = rpc.token_balance(b.wallet, mint)
+            b.retained_pct = min(100.0, 100.0 * bal / b.tokens_bought)
         except Exception:
-            continue
-        b.retained_pct = min(100.0, 100.0 * bal / b.tokens_bought)
+            pass
+
+
+def trace_buyers(rpc: SolRpc, launch: SolLaunch, mint: str,
+                 workers: int = 8) -> None:
+    """Per-buyer traces in parallel — this phase dominated scan time serially
+    (16s of a 19s scan on a 21-buyer launch)."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    targets = launch.buyers[: config.MAX_EARLY_BUYERS]
+    if not targets:
+        return
+    tls = threading.local()   # one SolRpc (session) per worker thread
+
+    def run(b: SolBuyer) -> None:
+        if not hasattr(tls, "rpc"):
+            tls.rpc = rpc.clone()
+        _trace_one(tls.rpc, b, mint, launch.creation_time)
+
+    with ThreadPoolExecutor(max_workers=min(workers, len(targets))) as ex:
+        for f in [ex.submit(run, b) for b in targets]:
+            f.result()
 
 
 def _inbound_funder(tx: dict, wallet: str) -> str | None:
@@ -375,7 +432,8 @@ def collect(mint: str, log: bool = True) -> dict:
     timings["mint"] = round(time.time() - t, 2)
 
     t = time.time()
-    launch = analyze_launch(rpc, mint, pool) if pool else None
+    quote_mint = (best.get("quoteToken") or {}).get("address")
+    launch = analyze_launch(rpc, mint, pool, quote_mint) if pool else None
     timings["launch"] = round(time.time() - t, 2)
     if launch and launch.history_complete and launch.buyers:
         t = time.time()
