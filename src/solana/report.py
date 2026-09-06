@@ -50,7 +50,7 @@ KNOWN_VENUE_PROGRAMS = {
 def _venues() -> dict[str, str]:
     out = dict(KNOWN_VENUE_PROGRAMS)
     for entry in os.environ.get("SOLANA_VENUES", "").split(";"):
-        name, _, prog in entry.partition(":")
+        name, _, prog = entry.partition(":")
         if name.strip() and prog.strip():
             out[prog.strip()] = name.strip()
     return out
