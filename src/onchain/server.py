@@ -223,6 +223,10 @@ def scan_once() -> None:
         smart = wallets.smart_set()
     except Exception:
         smart = set()
+    try:
+        cohort = wallets.cohort_set()
+    except Exception:
+        cohort = set()
 
     with state["lock"]:
         setup_tokens = {r.get("token") for r in state["setups"]["rows"]
@@ -234,13 +238,19 @@ def scan_once() -> None:
                                   limit=60, snipe_window_blocks=snipe_window,
                                   entrypoint_sink=entrypoints):
         smart_hits = smart.intersection(l.snipe_buyers)
+        cohort_hits = cohort.intersection(l.snipe_buyers)
         cls = classify_pons(l)
         if smart_hits and cls == "quiet":
             cls = "watch"
+        if cohort_hits:
+            cls = "bad"   # an operator cohort sniping = insider launch
         is_setup = l.token in setup_tokens
-        insider = l.exempt_buys + len(l.declared_exemptions)
+        insider = (l.exempt_buys + len(l.declared_exemptions)
+                   + len(cohort_hits))
         opp, reason = opportunity(l.taxed_buys, len(smart_hits), l.graduated,
                                   insider, 0, is_setup)
+        if cohort_hits:
+            reason += f", OPERATOR COHORT x{len(cohort_hits)}"
         rows[l.token] = {
             "venue": f"pons v{l.version}", "symbol": l.symbol, "token": l.token,
             "pair": l.curve_or_pool, "block": l.block,
@@ -262,12 +272,17 @@ def scan_once() -> None:
     for l in long_mod.recent_launches(rpc, from_block, to_block, deep=True,
                                       limit=40, window_blocks=long_window):
         smart_hits = smart.intersection(l.buyer_wallets)
+        cohort_hits = cohort.intersection(l.buyer_wallets)
         cls = classify_long(l)
         if smart_hits and cls == "quiet":
             cls = "watch"
+        if cohort_hits:
+            cls = "bad"
         is_setup = l.token in setup_tokens
         opp, reason = opportunity(l.early_buyers, len(smart_hits), False,
-                                  0, l.offloaded_top, is_setup)
+                                  len(cohort_hits), l.offloaded_top, is_setup)
+        if cohort_hits:
+            reason += f", OPERATOR COHORT x{len(cohort_hits)}"
         rows[l.token] = {
             "venue": f"long/{l.paired_symbol}", "symbol": l.symbol,
             "token": l.token, "pair": long_mod.POOL_MANAGER,
@@ -403,8 +418,10 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         traders.append(e)
                 smart = wallets.smart_set()
+                cohorts = wallets.detect_cohorts(wallets.smart_candidates())
                 for e in traders:
                     e["smart"] = e["wallet"] in smart and not _is_contract(e["wallet"])
+                    e["cohort"] = cohorts.get(e["wallet"], 0)
                 # display-only USD conversion at CURRENT DexScreener prices;
                 # unpriced quotes are named, never silently dropped
                 quote_syms = sorted({q for e in traders
@@ -424,6 +441,8 @@ class Handler(BaseHTTPRequestHandler):
                     "rows": traders[:100],
                     "quote_prices_usd": px,
                     "smart_count": sum(1 for e in traders if e["smart"]),
+                    "cohort_wallet_count": sum(1 for e in traders if e["cohort"]),
+                    "funders_traced": len(store.wallet_funder_map()),
                     "repeat_wallet_count": len(traders),
                     "total_tracked": len(everyone),
                     "single_launch_count": len(everyone) - len(repeat),

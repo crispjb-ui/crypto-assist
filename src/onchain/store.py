@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS wallet_scans (
     token TEXT PRIMARY KEY,             -- launches already ingested (idempotence)
     ts INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS wallet_funders (
+    wallet TEXT NOT NULL,               -- traded wallet
+    chain TEXT NOT NULL,
+    funder TEXT NOT NULL,               -- '' = traced, nothing found on-chain
+    via_contract INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (wallet, chain)
+);
 CREATE TABLE IF NOT EXISTS quote_tokens (
     symbol TEXT NOT NULL,               -- quote symbol as stored on trades
     chain TEXT NOT NULL,
@@ -95,6 +102,42 @@ def upsert_wallet_trade(wallet: str, token: str, spent: float,
             (wallet.lower(), token.lower(), spent, received, trades,
              quote_symbol, config.CHAIN_KEY),
         )
+
+
+def remember_wallet_funder(wallet: str, funder: str,
+                           via_contract: bool = False) -> None:
+    """Record a wallet's first funding source ('' = traced, none found —
+    bridged-in). Only successful traces are stored; explorer failures are not."""
+    with connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO wallet_funders "
+                     "(wallet, chain, funder, via_contract) VALUES (?,?,?,?)",
+                     (wallet.lower(), config.CHAIN_KEY, funder.lower(),
+                      int(via_contract)))
+
+
+def wallet_funder_map() -> dict[str, str]:
+    """wallet -> funder for the current chain (only traced wallets appear)."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT wallet, funder FROM wallet_funders WHERE chain = ?",
+            (config.CHAIN_KEY,)).fetchall()
+    return dict(rows)
+
+
+def wallet_token_sets(wallets_list: list[str]) -> dict[str, set[str]]:
+    """wallet -> set of tokens traded, for portfolio-overlap comparison."""
+    if not wallets_list:
+        return {}
+    marks = ",".join("?" * len(wallets_list))
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT wallet, token FROM wallet_trades WHERE wallet IN ({marks}) "
+            f"AND {_chain_filter()}",
+            (*[w.lower() for w in wallets_list], config.CHAIN_KEY)).fetchall()
+    out: dict[str, set[str]] = {}
+    for w, t in rows:
+        out.setdefault(w, set()).add(t)
+    return out
 
 
 def remember_quote_token(symbol: str, address: str) -> None:

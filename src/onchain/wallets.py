@@ -33,6 +33,18 @@ SMART_MIN_TOKENS = 4
 SMART_MIN_WIN_RATE = 0.6
 SMART_MIN_REALIZED_QUOTE = 0.5  # net quote units (ETH) actually extracted
 
+# Operator-cohort signatures. A "winning" wallet is only a trader worth
+# following if it is independent; wallets that share any of these signatures
+# are one entity's cohort, and their wins are extraction, not edge.
+COHORT_MIN_PREFIX = 3    # >=N qualifying wallets sharing a vanity prefix
+PREFIX_HEX_CHARS = 4     # leading hex chars compared (2 bytes; among a few
+                         # hundred wallets, 3+ sharing 2 bytes by chance is
+                         # < 1e-3 — a cohort, not coincidence)
+COHORT_JACCARD = 0.8     # near-identical traded-token sets
+COHORT_MIN_PORTFOLIO = 3  # overlap only meaningful with >=3 tokens each
+FUNDER_FANOUT_CAP = 25   # a funder feeding more candidates than this is
+                         # infrastructure (CEX/bridge), not an operator wallet
+
 
 def ingest_curve_trades(rpc: EvmRpc, token: str, curve: str,
                         launch_block: int, window_blocks: int) -> int:
@@ -140,6 +152,10 @@ def scan(hours: float, limit: int, activity_hours: float = 2.0) -> None:
         print(f"  long [{i}/{len(long_launches)}] {l.token} — {n} quote legs",
               file=sys.stderr)
     print(f"ingested {new} new launch(es) into the wallet ledger")
+    traced = trace_funders()
+    if traced:
+        print(f"funding-traced {traced} smart candidate(s) for cohort detection",
+              file=sys.stderr)
 
 
 def leaderboard(min_tokens: int = SMART_MIN_TOKENS) -> list[dict]:
@@ -174,21 +190,116 @@ def leaderboard(min_tokens: int = SMART_MIN_TOKENS) -> list[dict]:
     return out
 
 
-def smart_set(min_tokens: int = SMART_MIN_TOKENS,
-              min_win_rate: float = SMART_MIN_WIN_RATE,
-              min_realized: float = SMART_MIN_REALIZED_QUOTE) -> set[str]:
-    """Smart = enough sample, real win rate, no net-losing book in any quote,
-    and a meaningful realized total in at least one quote. Quote units are not
-    comparable across currencies (0.5 ETH != 0.5 NVDA) — the threshold is an
-    order-of-magnitude bar, and the calibration loop is the place to tune it."""
-    smart = set()
+def smart_candidates(min_tokens: int = SMART_MIN_TOKENS,
+                     min_win_rate: float = SMART_MIN_WIN_RATE,
+                     min_realized: float = SMART_MIN_REALIZED_QUOTE) -> set[str]:
+    """Wallets passing the PnL bar alone: enough sample, real win rate, no
+    net-losing book in any quote, meaningful realized total in at least one.
+    Quote units are not comparable across currencies (0.5 ETH != 0.5 NVDA) —
+    the threshold is an order-of-magnitude bar, tuned by the calibration loop.
+    Passing this bar does NOT make a wallet smart — cohort detection below
+    decides whether the wins belong to a trader or to an operator's cohort."""
+    out = set()
     for e in leaderboard(min_tokens):
         by_q = e["realized_by_quote"]
         if (e["win_rate"] >= min_win_rate
                 and all(v >= 0 for v in by_q.values())
                 and any(v >= min_realized for v in by_q.values())):
-            smart.add(e["wallet"])
-    return smart
+            out.add(e["wallet"])
+    return out
+
+
+def detect_cohorts(candidates: set[str]) -> dict[str, int]:
+    """wallet -> cohort size, for candidates that share an operator signature:
+    same funding source, same vanity prefix, or near-identical portfolio.
+    Wallets absent from the result showed none of the three signatures —
+    'independent as far as these checks see', not proven independent."""
+    wallets_list = sorted(candidates)
+    if not wallets_list:
+        return {}
+    parent = {w: w for w in wallets_list}
+
+    def find(w: str) -> str:
+        while parent[w] != w:
+            parent[w] = parent[parent[w]]
+            w = parent[w]
+        return w
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    # (1) shared funder — proof-grade even for 2 wallets, except high-fanout
+    # funders (CEX/bridge infrastructure funds strangers too)
+    by_funder: dict[str, list[str]] = defaultdict(list)
+    for w, f in store.wallet_funder_map().items():
+        if f and w in parent:
+            by_funder[f].append(w)
+    for group in by_funder.values():
+        if 2 <= len(group) <= FUNDER_FANOUT_CAP:
+            for w in group[1:]:
+                union(group[0], w)
+
+    # (2) shared vanity prefix
+    by_prefix: dict[str, list[str]] = defaultdict(list)
+    for w in wallets_list:
+        by_prefix[w[2:2 + PREFIX_HEX_CHARS]].append(w)
+    for group in by_prefix.values():
+        if len(group) >= COHORT_MIN_PREFIX:
+            for w in group[1:]:
+                union(group[0], w)
+
+    # (3) near-identical traded-token sets
+    tok = store.wallet_token_sets(wallets_list)
+    eligible = [w for w in wallets_list
+                if len(tok.get(w, ())) >= COHORT_MIN_PORTFOLIO]
+    for i, a in enumerate(eligible):
+        ta = tok[a]
+        for b in eligible[i + 1:]:
+            tb = tok[b]
+            if len(ta & tb) / len(ta | tb) >= COHORT_JACCARD:
+                union(a, b)
+
+    sizes: dict[str, int] = defaultdict(int)
+    for w in wallets_list:
+        sizes[find(w)] += 1
+    return {w: sizes[find(w)] for w in wallets_list if sizes[find(w)] >= 2}
+
+
+def smart_set(min_tokens: int = SMART_MIN_TOKENS,
+              min_win_rate: float = SMART_MIN_WIN_RATE,
+              min_realized: float = SMART_MIN_REALIZED_QUOTE) -> set[str]:
+    """Independent winners only: the PnL bar minus operator cohorts."""
+    cands = smart_candidates(min_tokens, min_win_rate, min_realized)
+    return cands - set(detect_cohorts(cands))
+
+
+def cohort_set() -> set[str]:
+    """Profitable wallets carrying an operator-cohort signature. On the feed
+    these are an insider warning, not a follow signal."""
+    return set(detect_cohorts(smart_candidates()))
+
+
+def trace_funders(limit: int = 150) -> int:
+    """Fill wallet_funders for smart candidates missing a trace (explorer
+    optional — silently does nothing when it is down). Runs inside the
+    periodic wallet job so cohort detection gets funding-proof over time."""
+    from . import explorer
+    have = store.wallet_funder_map()
+    todo = [w for w in sorted(smart_candidates()) if w not in have][:limit]
+    traced = 0
+    for w in todo:
+        try:
+            ev = explorer.funding_event(w)
+        except Exception:
+            continue
+        if ev is None and explorer.LAST_ERROR:
+            continue                     # explorer failure — don't record
+        store.remember_wallet_funder(w, (ev or {}).get("from") or "",
+                                     bool((ev or {}).get("internal")))
+        traced += 1
+    return traced
 
 
 def main() -> None:
