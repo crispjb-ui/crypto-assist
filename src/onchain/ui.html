@@ -86,7 +86,7 @@
   <div class="box" id="entrybox"></div>
 </section>
 <section class="tab active" data-tabname="feed">
-  <h2>Quick scan — paste a CA</h2>
+  <h2>Quick scan — paste a CA (EVM 0x… or Solana mint)</h2>
   <form class="scan" id="scanform">
     <input id="token" placeholder="0x… token address" autocomplete="off" spellcheck="false">
     <input id="pair" placeholder="pair/curve (optional)" autocomplete="off" spellcheck="false">
@@ -355,6 +355,15 @@ $("#scanform").addEventListener("submit", async e => {
 });
 
 function render(d) {
+  if (d.text) {   // non-EVM (solana) scans arrive pre-rendered
+    const v = d.verdict || {score: 0};
+    const c = v.score >= 5 ? "score-bad" : v.score >= 2 ? "score-mid" : "score-ok";
+    const lines = d.text.split("\n");
+    $("#result").innerHTML =
+      `<span class="${c}">` + esc(lines[0]) + `</span>\n` +
+      esc(lines.slice(1).join("\n"));
+    return;
+  }
   const v = d.verdict, cls = v.score >= 5 ? "score-bad" : v.score >= 2 ? "score-mid" : "score-ok";
   const liq = d.market?.liquidity?.usd;
   let h = `<b>${esc(d.token.name)} (${esc(d.token.symbol)})</b>\n${esc(d.token.address)}\n`;

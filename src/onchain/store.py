@@ -183,17 +183,24 @@ def connect() -> sqlite3.Connection:
 
 def log_run(token: str, pair: str | None, kind: str, score: int,
             flags: list[dict], notes: list[str],
-            market: dict | None, data: dict | None) -> int:
+            market: dict | None, data: dict | None,
+            chain: str | None = None) -> int:
+    """chain override lets non-EVM stacks (solana) tag their rows so
+    calibration never mixes chains; default = the configured EVM chain.
+    Solana addresses are case-sensitive base58, so only 0x tokens lowercase."""
+    tok = token.lower() if token.startswith("0x") else token
+    pr = (pair or "")
+    pr = (pr.lower() if pr.startswith("0x") else pr) or None
     with connect() as conn:
         cur = conn.execute(
             "INSERT INTO runs (ts, token, pair, kind, score, flags_json, "
             "notes_json, market_json, data_json, chain) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (int(time.time()), token.lower(), (pair or "").lower() or None, kind,
+            (int(time.time()), tok, pr, kind,
              score, json.dumps(flags), json.dumps(notes),
              json.dumps(market) if market else None,
              json.dumps(data, default=str) if data else None,
-             config.CHAIN_KEY),
+             chain or config.CHAIN_KEY),
         )
         return int(cur.lastrowid)
 

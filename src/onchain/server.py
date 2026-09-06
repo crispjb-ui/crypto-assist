@@ -481,7 +481,27 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             req = json.loads(self.rfile.read(length) or b"{}")
             token = (req.get("token") or "").strip()
-            if not (token.startswith("0x") and len(token) == 42):
+            if not token.startswith("0x"):
+                # Solana mint? Route to the solana pipeline (same scan box).
+                from ..solana import b58 as _b58
+                from ..solana import report as _sol
+                if _b58.looks_like_address(token):
+                    try:
+                        payload = _sol.collect(token)
+                        payload["text"] = _sol.render_text(payload)
+                        self._json(200, payload)
+                    except _sol.NoPairError as exc:
+                        self._json(404, {"error": str(exc)})
+                    except SystemExit as exc:   # SOLANA_RPC_URL missing
+                        self._json(400, {"error": str(exc)})
+                    except Exception as exc:
+                        traceback.print_exc()
+                        self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+                    return
+                self._json(400, {"error": "enter a 42-character 0x address "
+                                          "or a Solana mint (base58)"})
+                return
+            if len(token) != 42:
                 self._json(400, {"error": "enter a 42-character 0x address"})
                 return
             pair = (req.get("pair") or "").strip() or None

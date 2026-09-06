@@ -86,8 +86,24 @@ chain so calibration and smart-money stats never mix across chains.
   `CRYPTO_ASSIST_ENV=.env.bsc`. The generic pipeline works unchanged; the
   Pons/Long watchers are Robinhood-chain contracts — bootstrap that chain's
   launchpads with `derive_factory.py` on any token they launched.
-- **Solana**: not EVM — different RPC protocol, no event logs, SPL accounts,
-  pump.fun programs. Requires a parallel detector implementation; not built.
+- **Solana**: built as a parallel stack in `src/solana/` (Solana has no EVM
+  event logs — detectors are rebuilt on transaction parsing and account
+  state). Set `SOLANA_RPC_URL` (dRPC serves Solana mainnet), then paste any
+  Solana mint into the dashboard quick-scan box, or run
+  `python -m src.solana.report <mint>`. Launchpad-agnostic: analysis drives
+  from the token's DexScreener pool (pump.fun, PumpSwap, Raydium,
+  stonk.fun stock-paired pools, ...), and the pool's owner program is
+  measured from the chain — label new launchpads via `SOLANA_VENUES` in
+  `.env`. Detector mapping: mint/freeze **authorities** replace the EVM
+  owner/mint() source checks (an active mint authority can print supply; an
+  active freeze authority is the honeypot lever); creation-**slot** buys
+  replace creation-block bundles; funding clusters come from each buyer's
+  earliest inbound System transfer; offload from current token balances;
+  concentration from the top-20 token accounts (full holder counts are not
+  cheaply available on Solana RPC and are reported as unmeasured, never
+  guessed). Runs are ledger-tagged `solana` so calibration never mixes
+  chains. Live feed/watcher for Solana launches is not built yet — scans are
+  on-demand.
 
 ## The improvement loop
 
