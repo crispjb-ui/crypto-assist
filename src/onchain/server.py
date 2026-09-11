@@ -313,6 +313,22 @@ def scan_once() -> None:
     except Exception:
         traceback.print_exc()
 
+    # stonk.fun bonding-phase radar — earlier than any pool indexer can see.
+    # Never overwrites a row that has on-chain analysis (block > 0), whether
+    # from this cycle or a previous one.
+    import os as _os
+    try:
+        if _os.environ.get("STONKFUN_FEED", "on").lower() != "off":
+            from ..solana import stonkfun as stonk_mod
+            with state["lock"]:
+                onchain_known = {t for t, r in state["feed"].items()
+                                 if r.get("block")}
+            for t, row in stonk_mod.feed_rows().items():
+                if t not in rows and t not in onchain_known:
+                    rows[t] = row
+    except Exception:
+        traceback.print_exc()
+
     # attach the latest diligence score from the ledger, when one exists,
     # and fold it into the ranking (a scanned-AVOID token must not rank #1)
     try:

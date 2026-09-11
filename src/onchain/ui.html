@@ -181,11 +181,14 @@ $("#alerts").onclick = async () => {
 function maybeAlert(rows) {
   if (!alertsOn) return;
   for (const x of rows) {
-    if ((x.smart || 0) > 0 && !notified.has(x.token)) {
+    const isSmart = (x.smart || 0) > 0;
+    if ((isSmart || x.hot) && !notified.has(x.token)) {
       notified.add(x.token);
       if (firstFeedLoaded) {
-        const n = new Notification(`SMART MONEY: ${x.symbol}`, {
-          body: `${x.smart} smart wallet(s) bought — ${x.venue}\n${x.detail}`,
+        const n = new Notification(
+          isSmart ? `SMART MONEY: ${x.symbol}` : `STONK.FUN HOT: ${x.symbol}`, {
+          body: (isSmart ? `${x.smart} smart wallet(s) bought — ` : "") +
+                `${x.venue}\n${x.reason}\n${x.detail}`,
           tag: x.token,
         });
         n.onclick = () => window.focus();

@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS wallet_funders (
     via_contract INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (wallet, chain)
 );
+CREATE TABLE IF NOT EXISTS launch_creators (
+    source TEXT NOT NULL,               -- launchpad, e.g. 'stonkfun'
+    token TEXT NOT NULL,
+    creator TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    PRIMARY KEY (source, token)
+);
 CREATE TABLE IF NOT EXISTS quote_tokens (
     symbol TEXT NOT NULL,               -- quote symbol as stored on trades
     chain TEXT NOT NULL,
@@ -159,6 +166,27 @@ def wallet_token_sets(wallets_list: list[str],
     for w, t in rows:
         out.setdefault(w, set()).add(t)
     return out
+
+
+def record_launch_creator(source: str, token: str, creator: str) -> None:
+    """Remember which wallet launched which token on a launchpad, so serial
+    launchers become measurable across polls instead of guessed."""
+    if not (token and creator):
+        return
+    with connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO launch_creators "
+                     "(source, token, creator, ts) "
+                     "VALUES (?,?,?,strftime('%s','now'))",
+                     (source, _key(token), _key(creator)))
+
+
+def creator_launch_counts(source: str) -> dict[str, int]:
+    """creator -> number of tokens launched on this launchpad (all time)."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT creator, COUNT(*) FROM launch_creators WHERE source = ? "
+            "GROUP BY creator", (source,)).fetchall()
+    return dict(rows)
 
 
 def remember_quote_token(symbol: str, address: str,
