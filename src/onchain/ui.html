@@ -82,6 +82,14 @@
 <section class="tab active" data-tabname="feed" id="feedwrap">
   <h2>Opportunities — best first (#1 = strongest), auto-refresh (Pons &amp; Long)</h2>
   <label class="detail"><input type="checkbox" id="watchonly" checked> candidates only (hide quiet)</label>
+  <label class="detail" style="margin-left:12px">venue:
+    <select id="venuefilter">
+      <option value="all">all</option>
+      <option value="stonk">stonk.fun</option>
+      <option value="sol">solana on-chain</option>
+      <option value="pons">pons</option>
+      <option value="long">long</option>
+    </select></label>
   <table id="feed"><tbody></tbody></table>
   <div class="box" id="entrybox"></div>
 </section>
@@ -210,6 +218,12 @@ async function refresh() {
       $("#status").textContent += " · EXPLORER FAILING: " + (d.explorer.error || "?");
     const only = $("#watchonly").checked;
     let rows = d.rows;
+    const vf = $("#venuefilter").value;
+    if (vf === "stonk")     rows = rows.filter(x => x.venue === "sol/stonk.fun");
+    else if (vf === "sol")  rows = rows.filter(x =>
+      x.venue.startsWith("sol/") && x.venue !== "sol/stonk.fun");
+    else if (vf === "pons") rows = rows.filter(x => x.venue.startsWith("pons"));
+    else if (vf === "long") rows = rows.filter(x => x.venue.startsWith("long"));
     if (only) rows = rows.filter(x =>
       x.cls !== "bad" && (x.cls === "watch" || x.smart > 0 || x.setup));
       // candidates = never "bad" — including rows a deep scan reclassified
@@ -340,6 +354,14 @@ document.addEventListener("click", async e => {
 });
 
 $("#watchonly").addEventListener("change", refresh);
+try {   // remember the venue choice per browser; storage may be unavailable
+  $("#venuefilter").value = localStorage.getItem("venueFilter") || "all";
+} catch (e) {}
+$("#venuefilter").addEventListener("change", () => {
+  try { localStorage.setItem("venueFilter", $("#venuefilter").value); }
+  catch (e) {}
+  refresh();
+});
 $("#scanform").addEventListener("submit", async e => {
   e.preventDefault();
   const btn = $("#go"); btn.disabled = true;
