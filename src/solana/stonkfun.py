@@ -49,8 +49,12 @@ def api_url() -> str:
     return os.environ.get("STONKFUN_API_URL", DEFAULT_API).rstrip("/")
 
 
+STONK_TIMEOUT = float(os.environ.get("STONKFUN_TIMEOUT", "20"))
+
+
 def _get(params: dict) -> tuple[int, object]:
-    resp = _session.get(api_url(), params=params, headers=_HEADERS, timeout=20)
+    resp = _session.get(api_url(), params=params, headers=_HEADERS,
+                        timeout=STONK_TIMEOUT)
     try:
         body = resp.json()
     except ValueError:
