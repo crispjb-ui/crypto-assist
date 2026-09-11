@@ -94,21 +94,44 @@ def _num(val) -> float | None:
 
 def normalize(rec: dict) -> dict | None:
     """Map one API record onto known fields; None when no mint is found.
-    Missing values stay None — assessment treats them as unmeasured."""
+    Live-verified shape (2026-09-11): data.tokens[] with market numbers under
+    "market" (marketCapUsd/volume24hUsd/liquidityUsd), quote as an object
+    {mint, symbol}, graduationProgress 0..1, transferFee {bps}, pool address.
+    NOTE: this endpoint exposes NO creator wallet — that filter stays
+    unmeasured unless a detail endpoint provides it. Missing values stay
+    None — assessment treats them as unmeasured, never assumed."""
     mint = _field(rec, "mint", "address", "tokenAddress", "token_address",
                   "ca", "id")
     if not isinstance(mint, str) or not (32 <= len(mint) <= 44):
         return None
+    market = rec.get("market") if isinstance(rec.get("market"), dict) else {}
+    quote = rec.get("quote")
+    if isinstance(quote, dict):
+        quote_sym, quote_mint = quote.get("symbol"), quote.get("mint")
+    else:
+        quote_sym, quote_mint = _field(rec, "quoteSymbol", "quote_symbol",
+                                       "quote", "pairedWith"), None
+    fee = rec.get("transferFee")
     return {
         "mint": mint,
+        "pool": _field(rec, "pool", "poolAddress", "pool_address"),
         "symbol": _field(rec, "symbol", "ticker", "name", default="?"),
         "name": _field(rec, "name", "symbol", default="?"),
-        "quote": _field(rec, "quoteSymbol", "quote_symbol", "quoteToken",
-                        "quote", "pairedWith", default="?"),
-        "mcap": _num(_field(rec, "marketCap", "market_cap", "mcap",
-                            "usdMarketCap", "usd_market_cap")),
-        "volume24h": _num(_field(rec, "volume24h", "volume_24h", "volume",
-                                 "volumeUsd", "volume_usd")),
+        "quote": quote_sym or "?",
+        "quote_mint": quote_mint,
+        "category": _field(rec, "categoryLabel", "category"),
+        "launchpad": rec.get("launchpad"),
+        "mcap": _num(_field(market, "marketCapUsd", "marketCap")
+                     or _field(rec, "marketCap", "market_cap", "mcap",
+                               "usdMarketCap", "usd_market_cap")),
+        "volume24h": _num(_field(market, "volume24hUsd", "volume24h")
+                          or _field(rec, "volume24h", "volume_24h", "volume",
+                                    "volumeUsd", "volume_usd")),
+        "liquidity": _num(_field(market, "liquidityUsd")),
+        "transfer_fee_bps": _num((fee or {}).get("bps")
+                                 if isinstance(fee, dict) else None),
+        "graduation": _num(_field(rec, "graduationProgress",
+                                  "graduation_progress")),
         "creator": _field(rec, "creator", "creatorWallet", "creator_wallet",
                           "creatorAddress", "deployer"),
         "status": _field(rec, "status", "state", "phase"),
@@ -173,9 +196,19 @@ def assess(row: dict, creator_counts: dict[str, int]) -> tuple[float, str, bool]
     elif vol is None:
         missing.append("volume")
 
-    if row.get("graduating"):
+    grad = row.get("graduation")
+    if row.get("graduating") or (grad is not None and grad >= 0.7):
         score += 6
-        reasons.append("about to graduate")
+        reasons.append("about to graduate"
+                       + (f" ({grad * 100:.0f}%)" if grad is not None else ""))
+    elif grad is not None and grad >= 0.3:
+        score += 2
+        reasons.append(f"bonding {grad * 100:.0f}%")
+
+    fee = row.get("transfer_fee_bps")
+    if fee:
+        score -= 1 if fee <= 100 else 2
+        reasons.append(f"transfer fee {fee / 100:.1f}%")
 
     creator = row.get("creator")
     if creator:
@@ -209,19 +242,32 @@ def feed_rows(opportunity_unused=None) -> dict[str, dict]:
     for r in poll():
         opp, reason, hot = assess(r, counts)
         cls = "watch" if hot else ("quiet" if opp >= 0 else "bad")
+        if r.get("quote_mint"):        # price these quotes on the wallet board
+            try:
+                store.remember_quote_token(str(r["quote"]), r["quote_mint"],
+                                           chain="solana")
+            except Exception:
+                pass
+        grad = r.get("graduation")
         rows[r["mint"]] = {
             "venue": "sol/stonk.fun", "symbol": str(r.get("symbol") or "?"),
-            "token": r["mint"], "pair": "",
+            "token": r["mint"], "pair": r.get("pool") or "",
             "block": 0, "creation_block": 0,
-            "cls": cls, "graduated": bool(r.get("graduating")),
+            "cls": cls,
+            "graduated": bool(r.get("graduating")
+                              or (grad is not None and grad >= 1)),
             "smart": 0, "setup": False, "hot": hot,
             "opp": round(opp, 1), "reason": reason,
-            "detail": (f"quote {r.get('quote')}, "
-                       f"mcap ${(r.get('mcap') or 0):,.0f}, "
-                       f"24h vol ${(r.get('volume24h') or 0):,.0f}"
-                       + (f", {int(r['holders'])} holders"
-                          if r.get("holders") is not None else "")
-                       + (f", status {r['status']}" if r.get("status") else "")),
+            "detail": (f"quote {r.get('quote')}"
+                       + (f" [{r['category']}]" if r.get("category") else "")
+                       + f", mcap ${(r.get('mcap') or 0):,.0f}"
+                       + f", 24h vol ${(r.get('volume24h') or 0):,.0f}"
+                       + (f", liq ${r['liquidity']:,.0f}"
+                          if r.get("liquidity") is not None else "")
+                       + (f", grad {grad * 100:.0f}%"
+                          if grad is not None else "")
+                       + (f", fee {r['transfer_fee_bps'] / 100:.1f}%"
+                          if r.get("transfer_fee_bps") else "")),
         }
     return rows
 
