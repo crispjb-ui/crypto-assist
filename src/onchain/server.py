@@ -72,7 +72,16 @@ def _probe_entrypoints_job() -> None:
         try:
             tx = rpc.call("eth_getTransactionByHash", [e["sample_tx"]])
             if isinstance(tx, dict):
-                e["probe"] = pons.probe_calldata(tx.get("input", ""))
+                # probe the INNER call (wrappers peeled) that matches this
+                # entry, so the structure shown is the router's, not the
+                # user's smart-account envelope
+                inner = pons.unwrap_calldata((tx.get("to") or "").lower(),
+                                             tx.get("input", ""))
+                data = next((d for t, d in inner
+                             if t == e["entrypoint"]
+                             and d[:10].lower() == e["selector"]),
+                            tx.get("input", ""))
+                e["probe"] = pons.probe_calldata(data)
         except Exception as exc:
             e["probe"] = {"error": _redact(str(exc))}
     with state["lock"]:

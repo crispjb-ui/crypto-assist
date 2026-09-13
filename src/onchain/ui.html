@@ -246,6 +246,7 @@ async function refresh() {
       "copy this whole box to Claude to add exact bundle decoding:\n" +
       eps.map(e =>
         `${e.entrypoint} selector ${e.selector} (${e.count} launches, sample tx ${e.sample_tx})` +
+        (e.via ? ` via ${e.via}` : "") +
         (e.probe ? "\n  probe: " + JSON.stringify(e.probe) : "")).join("\n");
     const jobs = d.jobs || {};
     $("#jobs").textContent = Object.entries(jobs).map(([n, j]) =>

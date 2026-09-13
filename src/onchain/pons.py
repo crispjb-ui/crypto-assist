@@ -72,6 +72,103 @@ def is_known_entrypoint(to: str, selector: str) -> bool:
             or selector in KNOWN_SELECTORS)
 
 
+# Account-abstraction / multisig wrappers seen carrying launches on Robinhood
+# Chain: the launch call is nested inside the wallet's execute calldata, so
+# the tx `to` is the user's smart account (a different address per user —
+# hence hundreds of "1 launch" entrypoints). Selectors keccak-verified.
+WRAPPER_SELECTORS = {
+    "0xe9ae5c53": "erc7579 execute(bytes32,bytes)",
+    "0x34fcd5be": "executeBatch((address,uint256,bytes)[])",
+    "0x6a761202": "safe execTransaction(address,uint256,bytes,uint8,uint256,"
+                  "uint256,uint256,address,address,bytes)",
+    "0x765e827f": "entrypoint v0.7 handleOps((address,uint256,bytes,bytes,"
+                  "bytes32,uint256,bytes32,bytes,bytes)[],address)",
+    "0x1fad948c": "entrypoint v0.6 handleOps((address,uint256,bytes,bytes,"
+                  "uint256,uint256,uint256,uint256,uint256,bytes,bytes)[],address)",
+    "0xb61d27f6": "execute(address,uint256,bytes)",
+    "0x47e1da2a": "executeBatch(address[],uint256[],bytes[])",
+    "0x18dfb3c7": "executeBatch(address[],bytes[])",
+}
+
+
+def _hx_uint(body: str, off: int) -> int:
+    return int(body[off * 2 : off * 2 + 64] or "0", 16)
+
+
+def _hx_addr(body: str, off: int) -> str:
+    return "0x" + body[off * 2 + 24 : off * 2 + 64]
+
+
+def _hx_bytes(body: str, off: int) -> str:
+    n = _hx_uint(body, off)
+    return body[off * 2 + 64 : off * 2 + 64 + 2 * n]
+
+
+def _decode_call_array(body: str, arr_off: int) -> list[tuple[str, str]]:
+    """(address,uint256,bytes)[] whose length word sits at byte `arr_off`."""
+    n = _hx_uint(body, arr_off)
+    base = arr_off + 32
+    out = []
+    for i in range(min(n, 64)):
+        t = base + _hx_uint(body, base + 32 * i)
+        d = t + _hx_uint(body, t + 64)
+        out.append((_hx_addr(body, t), "0x" + _hx_bytes(body, d)))
+    return out
+
+
+def unwrap_calldata(to: str, data: str, depth: int = 0) -> list[tuple[str, str]]:
+    """Peel smart-account / multisig / EntryPoint wrappers off a launch tx and
+    return the inner (target, calldata) calls. Non-wrapper input returns
+    itself. Recurses (handleOps -> account execute -> factory)."""
+    sel = data[:10].lower()
+    body = data[10:]
+    calls: list[tuple[str, str]] = []
+    try:
+        if sel == "0xe9ae5c53":                    # ERC-7579 execute(mode, exec)
+            call_type = body[:2]                   # mode byte 0: 00 single,
+            ex = _hx_bytes(body, _hx_uint(body, 32))   # 01 batch, ff delegate
+            if call_type == "00":                  # target(20)|value(32)|data
+                calls = [("0x" + ex[:40], "0x" + ex[104:])]
+            elif call_type == "ff":                # target(20)|data
+                calls = [("0x" + ex[:40], "0x" + ex[40:])]
+            elif call_type == "01":
+                calls = _decode_call_array(ex, _hx_uint(ex, 0))
+        elif sel == "0x34fcd5be":
+            calls = _decode_call_array(body, _hx_uint(body, 0))
+        elif sel in ("0x6a761202", "0xb61d27f6"):  # (to, value, data, ...)
+            calls = [(_hx_addr(body, 0),
+                      "0x" + _hx_bytes(body, _hx_uint(body, 64)))]
+        elif sel in ("0x765e827f", "0x1fad948c"):  # handleOps(ops[], beneficiary)
+            arr = _hx_uint(body, 0)
+            n = _hx_uint(body, arr)
+            base = arr + 32
+            for i in range(min(n, 32)):
+                op = base + _hx_uint(body, base + 32 * i)
+                cd = "0x" + _hx_bytes(body, op + _hx_uint(body, op + 96))
+                calls.append((_hx_addr(body, op), cd))   # sender, callData
+        elif sel in ("0x47e1da2a", "0x18dfb3c7"):
+            a_off = _hx_uint(body, 0)
+            d_off = _hx_uint(body, 64 if sel == "0x47e1da2a" else 32)
+            n = min(_hx_uint(body, a_off), _hx_uint(body, d_off), 64)
+            for i in range(n):
+                b = d_off + 32 + _hx_uint(body, d_off + 32 + 32 * i)
+                calls.append((_hx_addr(body, a_off + 32 + 32 * i),
+                              "0x" + _hx_bytes(body, b)))
+        else:
+            return [(to, data)]
+    except (ValueError, IndexError):
+        return [(to, data)]
+    # malformed/truncated wrapper bodies must degrade to the original call,
+    # never to an empty target
+    if (not calls or depth >= 3
+            or any(len(t) != 42 or len(d) < 10 for t, d in calls)):
+        return [(to, data)]
+    out: list[tuple[str, str]] = []
+    for t, d in calls:
+        out.extend(unwrap_calldata(t.lower(), d, depth + 1))
+    return out
+
+
 @dataclass
 class PonsLaunch:
     version: int
@@ -85,6 +182,8 @@ class PonsLaunch:
     # "exact": decoded from a known factory selector; "heuristic": address[]
     # recovered from unrecognized (router) calldata; "opaque": nothing found.
     exemption_source: str = "exact"
+    wrapper: str = ""              # smart-account/multisig wrapper the launch
+                                   # call was nested in, "" if direct
     graduated: bool = False
     # snipe-window trading (V2 only)
     exempt_buys: int = 0           # tax-free buys in the window = the bundle executing
@@ -295,16 +394,36 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
         launch.graduated = launch.token in graduated_tokens
         if launch.version == 2 and isinstance(tx, dict):
             calldata = tx.get("input", "")
-            to = (tx.get("to") or "?").lower()
-            sel = calldata[:10].lower()
-            launch.declared_exemptions, launch.exemption_source = \
-                exemptions_from_calldata(calldata)
+            raw_to = (tx.get("to") or "").lower()
+            outer_sel = calldata[:10].lower()
+            if not raw_to:
+                # contract-creation tx: the launch IS a deploy (token or
+                # personal launcher deployed in the same tx). No entrypoint
+                # to decode; execution truth still classifies the launch.
+                launch.wrapper = "direct deploy"
+                launch.declared_exemptions, launch.exemption_source = [], "opaque"
+                to, sel = "", ""
+            else:
+                # peel smart-account / multisig / EntryPoint wrappers and pick
+                # the inner call that reaches the factory or a known router
+                inner = unwrap_calldata(raw_to, calldata)
+                to, calldata = next(
+                    ((t, d) for t, d in inner
+                     if t == V2_FACTORY.lower()
+                     or is_known_entrypoint(t, d[:10].lower())),
+                    inner[0])
+                sel = calldata[:10].lower()
+                if outer_sel in WRAPPER_SELECTORS and (to, calldata) != (raw_to, tx.get("input", "")):
+                    launch.wrapper = WRAPPER_SELECTORS[outer_sel]
+                launch.declared_exemptions, launch.exemption_source = \
+                    exemptions_from_calldata(calldata)
             # a confirmed launch entrypoint isn't "unrecognized" — only flag
-            # genuinely unknown ones for probing
-            if launch.exemption_source not in ("exact", "corroborated") \
+            # genuinely unknown ones for probing (by their INNER call, so the
+            # box names the real router, not a user's wallet contract)
+            if to and launch.exemption_source not in ("exact", "corroborated") \
                     and not is_known_entrypoint(to, sel):
-                entry = unknown_entrypoints.setdefault((to, sel),
-                                                       [0, launch.tx_hash])
+                entry = unknown_entrypoints.setdefault(
+                    (to, sel), [0, launch.tx_hash, launch.wrapper])
                 entry[0] += 1
             try:
                 snipe_window_activity(rpc, launch,
@@ -324,15 +443,15 @@ def recent_launches(rpc: EvmRpc, from_block: int, to_block: int,
     if unknown_entrypoints:
         # One quiet summary — bundle detection runs on execution truth
         # (tax-free buyers), so undecoded routers don't affect results.
-        total = sum(c for c, _ in unknown_entrypoints.values())
+        total = sum(c for c, *_ in unknown_entrypoints.values())
         print(f"note: {total} launch(es) via {len(unknown_entrypoints)} novel "
               "router entrypoint(s); bundle detection unaffected "
               "(execution-truth based).", file=sys.stderr)
         if entrypoint_sink is not None:
-            for (to, sel), (count, sample) in unknown_entrypoints.items():
+            for (to, sel), (count, sample, via) in unknown_entrypoints.items():
                 entrypoint_sink[f"{to} {sel}"] = {
                     "entrypoint": to, "selector": sel,
-                    "count": count, "sample_tx": sample}
+                    "count": count, "sample_tx": sample, "via": via}
     return launches
 
 
