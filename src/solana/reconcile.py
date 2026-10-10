@@ -780,6 +780,107 @@ def render_feeders(d: dict) -> str:
     return "\n".join(out)
 
 
+# ------------------------------------------------------- operator view
+def operator_view(rpc: SolRpc, wallets_: list[tuple[str, str]], mint: str,
+                  max_txs: int | None = None) -> dict:
+    """One token across an operator's wallets as a single book: purchases,
+    sales, cash flows and holdings summed; transfers BETWEEN group wallets
+    netted out (they are internal moves, not gains or losses); transfers to
+    or from outsiders kept. Each wallet's ledger is also returned."""
+    global MAX_TXS, MAX_SIG_PAGES
+    if max_txs:
+        MAX_TXS = max_txs
+        MAX_SIG_PAGES = max(MAX_SIG_PAGES, max_txs // 1000 + 1)
+    group = {w for _, w in wallets_}
+    macc = rpc.account_info(mint)
+    if not macc:
+        raise ValueError(f"{mint} is not an account on this RPC's chain")
+    mi = parse_mint(mint, macc)
+    symbols = _symbol_map()
+    sym = symbols.get(mint) or _dex_symbol(mint) or "?"
+    ledgers = []
+    agg = {"buys": 0, "sells": 0, "bought": 0.0, "sold": 0.0,
+           "ext_in": 0.0, "ext_out": 0.0, "protocol_in": 0.0,
+           "protocol_out": 0.0, "lp_deposited": 0.0, "lp_withdrawn": 0.0,
+           "burned": 0.0, "holdings": 0.0, "outlay": defaultdict(float),
+           "receipts": defaultdict(float), "net_flow": defaultdict(float),
+           "internal_moved": 0.0, "truncated": [], "unfetchable": 0}
+    for label, w in wallets_:
+        led = reconcile_wallet(rpc, w, mint, mi, symbols, label)
+        led.symbol = sym
+        ledgers.append(led)
+        for k in ("buys", "sells", "bought", "sold", "protocol_in",
+                  "protocol_out", "lp_deposited", "lp_withdrawn", "burned"):
+            agg[k] += getattr(led, k)
+        if led.balance_now == led.balance_now:
+            agg["holdings"] += led.balance_now
+        for d, key in ((led.outlay, "outlay"), (led.receipts, "receipts"),
+                       (led.net_flow, "net_flow")):
+            for c, v in d.items():
+                agg[key][c] += v
+        for e in led.events:
+            if e.kind == "transfer_in":
+                if e.counterparty in group:
+                    agg["internal_moved"] += e.tokens
+                else:
+                    agg["ext_in"] += e.tokens
+            elif e.kind == "transfer_out" and e.counterparty not in group:
+                agg["ext_out"] += -e.tokens
+        if not led.history_complete:
+            agg["truncated"].append(label)
+        agg["unfetchable"] += led.txs_unfetchable
+    for key in ("outlay", "receipts", "net_flow"):
+        agg[key] = dict(agg[key])
+    return {"mint": mint, "symbol": sym, "wallets": wallets_, "agg": agg,
+            "ledgers": [asdict(l) for l in ledgers]}
+
+
+def render_operator(d: dict) -> str:
+    a, sym = d["agg"], d["symbol"]
+    out = [f"=== OPERATOR VIEW — {sym} {d['mint']} across "
+           f"{len(d['wallets'])} wallet(s): "
+           + ", ".join(f"{l} {w[:6]}…" for l, w in d["wallets"]) + " ===",
+           "internal transfers between these wallets are netted out; cash "
+           "flows per currency; SOL includes fees and rent", ""]
+    out.append(f"  {a['buys']} purchases: {_fmt(a['bought'])} {sym}   outlay {_flows(a['outlay'])}")
+    out.append(f"  {a['sells']} sales:     {_fmt(a['sold'])} {sym}   receipts {_flows(a['receipts'])}")
+    if a["ext_in"] or a["ext_out"]:
+        out.append(f"  external transfers: +{_fmt(a['ext_in'])} in, -{_fmt(a['ext_out'])} out {sym}")
+    if a["internal_moved"]:
+        out.append(f"  moved between own wallets: {_fmt(a['internal_moved'])} {sym} (netted)")
+    if a["protocol_in"] or a["protocol_out"]:
+        out.append(f"  protocol fills/claims +{_fmt(a['protocol_in'])}, escrows/deposits -{_fmt(a['protocol_out'])} {sym}")
+    if a["lp_deposited"] or a["lp_withdrawn"]:
+        out.append(f"  liquidity: {_fmt(a['lp_deposited'])} deposited, {_fmt(a['lp_withdrawn'])} withdrawn {sym}")
+    if a["burned"]:
+        out.append(f"  burned: {_fmt(a['burned'])} {sym}")
+    out.append(f"  net cash flow: {_flows(a['net_flow'])}")
+    for name, fl in (("outlay", a["outlay"]), ("receipts", a["receipts"]),
+                     ("net cash flow", a["net_flow"])):
+        line = _usd_line(name, fl)
+        if line:
+            out.append(line.strip().join(["  ", ""]))
+    out.append(f"  holds now (all wallets): {_fmt(a['holdings'])} {sym}")
+    if USD:
+        px = _usd_price(d["mint"])
+        if px is not None:
+            v, _ = usd_now(a["net_flow"])
+            out.append(f"  ≈ holdings now: ${a['holdings'] * px:,.0f} (× ${px:.6g})")
+            if v is not None:
+                out.append(f"  ≈ OPERATOR RESULT now: ${v + a['holdings'] * px:,.0f} "
+                           "(net cash flow + holdings, current prices; NOT realized P&L)")
+    if a["truncated"]:
+        out.append(f"  [note] history truncated for: {', '.join(a['truncated'])} — "
+                   "older activity excluded (raise --max-txs)")
+    if a["unfetchable"]:
+        out.append(f"  [note] {a['unfetchable']} transaction(s) unfetchable — excluded")
+    out.append("")
+    out.append("per wallet:")
+    for l in d["ledgers"]:
+        out += render_ledger(l) + [""]
+    return "\n".join(out)
+
+
 def _dex_symbol(mint: str) -> str | None:
     try:
         pairs = [p for p in dexscreener.token_pairs(mint)
@@ -907,7 +1008,7 @@ def render_text(d: dict) -> str:
 def main() -> int:
     global VERBOSE, MAX_TXS, MAX_SIG_PAGES, USD
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("address")
+    ap.add_argument("address", nargs="?", default="")
     ap.add_argument("--mint", help="when address is a wallet: the token to "
                                    "reconcile — full mint or its ticker (e.g. HOTBOT)")
     ap.add_argument("--wallets", type=int, default=DEFAULT_WALLETS)
@@ -920,6 +1021,9 @@ def main() -> int:
     ap.add_argument("--debug", action="store_true",
                     help="progress on stderr + RPC diagnostics for unfetchable txs")
     ap.add_argument("--probe-sig", help="diagnose one transaction signature and exit")
+    ap.add_argument("--operator", action="store_true",
+                    help="consolidate the SOLANA_WATCH_WALLETS group as one "
+                         "book for --mint (internal transfers netted)")
     ap.add_argument("--feeders", action="store_true",
                     help="wallet address: verify it is a holding wallet fed by "
                          "a trading wallet (who sent, did they buy, do amounts match)")
@@ -929,12 +1033,37 @@ def main() -> int:
     if a.max_txs:
         MAX_TXS = a.max_txs
         MAX_SIG_PAGES = max(MAX_SIG_PAGES, a.max_txs // 1000 + 1)
+    if a.operator:
+        from .watch import watched
+        group = watched()
+        if not group:
+            print("SOLANA_WATCH_WALLETS is empty — nothing to consolidate",
+                  file=sys.stderr)
+            return 2
+        if not a.mint:
+            print("--operator needs --mint <token or ticker>", file=sys.stderr)
+            return 2
+        rpc = SolRpc()
+        mint = a.mint
+        if not b58.looks_like_address(mint):
+            for _, w in group:
+                try:
+                    mint = resolve_mint(rpc, w, a.mint)
+                    break
+                except ValueError:
+                    continue
+        if not b58.looks_like_address(mint):
+            print(f"could not resolve {a.mint} in any watched wallet — pass the full mint",
+                  file=sys.stderr)
+            return 2
+        print(render_operator(operator_view(rpc, group, mint, a.max_txs)))
+        return 0
     if a.probe_sig:
         for k, v in SolRpc().probe_transaction(a.probe_sig).items():
             print(f"{k:<24} {v}")
         return 0
     if not b58.looks_like_address(a.address):
-        print("not a base58 Solana address", file=sys.stderr)
+        print("not a base58 Solana address (or use --operator --mint X)", file=sys.stderr)
         return 2
     try:
         if a.feeders:
