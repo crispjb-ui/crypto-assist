@@ -39,7 +39,8 @@ SYSTEM_PROGRAM = "11111111111111111111111111111111"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 # Liquidity/DEX programs labeled ONLY on exact match (ids verified in use);
 # anything else is shown raw. Extend via SOLANA_VENUES like report.py.
-LP_PROGRAMS = dict(KNOWN_VENUE_PROGRAMS)
+from .report import _venues as _env_venues
+LP_PROGRAMS = dict(_env_venues())      # KNOWN_VENUE_PROGRAMS + SOLANA_VENUES labels
 LP_PROGRAMS.update({
     "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo": "Meteora DLMM",
     "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB": "Meteora Dynamic AMM",
@@ -828,7 +829,8 @@ def operator_view(rpc: SolRpc, wallets_: list[tuple[str, str]], mint: str,
     agg = {"buys": 0, "sells": 0, "bought": 0.0, "sold": 0.0,
            "ext_in": 0.0, "ext_out": 0.0, "protocol_in": 0.0,
            "protocol_out": 0.0, "lp_deposited": 0.0, "lp_withdrawn": 0.0,
-           "burned": 0.0, "holdings": 0.0, "outlay": defaultdict(float),
+           "burned": 0.0, "holdings": 0.0, "in_protocol": 0.0,
+           "outlay": defaultdict(float),
            "receipts": defaultdict(float), "net_flow": defaultdict(float),
            "internal_moved": 0.0, "truncated": [], "unfetchable": 0}
     for label, w in wallets_:
@@ -840,6 +842,10 @@ def operator_view(rpc: SolRpc, wallets_: list[tuple[str, str]], mint: str,
             agg[k] += getattr(led, k)
         if led.balance_now == led.balance_now:
             agg["holdings"] += led.balance_now
+        # net still inside protocol accounts (staked / escrowed / parked):
+        # out minus back, never below zero
+        agg["in_protocol"] += max(0.0, (led.protocol_out + led.lp_deposited)
+                                  - (led.protocol_in + led.lp_withdrawn))
         for d, key in ((led.outlay, "outlay"), (led.receipts, "receipts"),
                        (led.net_flow, "net_flow")):
             for c, v in d.items():
@@ -886,15 +892,22 @@ def render_operator(d: dict) -> str:
         line = _usd_line(name, fl)
         if line:
             out.append(line.strip().join(["  ", ""]))
-    out.append(f"  holds now (all wallets): {_fmt(a['holdings'])} {sym}")
+    out.append(f"  holds now (all wallets): {_fmt(a['holdings'])} {sym}"
+               + (f"  + {_fmt(a['in_protocol'])} {sym} inside protocols "
+                  "(staked/escrowed, not returned yet)" if a["in_protocol"] else ""))
     if USD:
         px = _usd_price(d["mint"])
         if px is not None:
             v, _ = usd_now(a["net_flow"])
-            out.append(f"  ≈ holdings now: ${a['holdings'] * px:,.0f} (× ${px:.6g})")
+            total_tokens = a["holdings"] + a["in_protocol"]
+            out.append(f"  ≈ holdings now: ${a['holdings'] * px:,.0f}"
+                       + (f" + ${a['in_protocol'] * px:,.0f} in protocols"
+                          if a["in_protocol"] else "")
+                       + f" (× ${px:.6g})")
             if v is not None:
-                out.append(f"  ≈ OPERATOR RESULT now: ${v + a['holdings'] * px:,.0f} "
-                           "(net cash flow + holdings, current prices; NOT realized P&L)")
+                out.append(f"  ≈ OPERATOR RESULT now: ${v + total_tokens * px:,.0f} "
+                           "(net cash flow + holdings incl. staked, current "
+                           "prices; NOT realized P&L)")
     if a["truncated"]:
         out.append(f"  [note] history truncated for: {', '.join(a['truncated'])} — "
                    "older activity excluded (raise --max-txs)")
