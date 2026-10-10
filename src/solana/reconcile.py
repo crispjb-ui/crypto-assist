@@ -505,10 +505,35 @@ def key_wallets(rpc: SolRpc, mint: str, mint_info, limit: int,
     return out
 
 
+def resolve_mint(rpc: SolRpc, wallet: str, mint_or_symbol: str) -> str:
+    """Accept a full mint or a ticker; a ticker is matched against the
+    symbols of the wallet's own token accounts (DexScreener lookup, cached).
+    Ambiguous or unknown tickers raise with the candidates listed."""
+    if b58.looks_like_address(mint_or_symbol):
+        return mint_or_symbol
+    want = mint_or_symbol.upper().lstrip("$")
+    hits = []
+    for a in rpc.token_accounts(wallet):
+        m = a["mint"]
+        if m not in _sym_cache:
+            _sym_cache[m] = _dex_symbol(m)
+        if (_sym_cache[m] or "").upper() == want:
+            hits.append(m)
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise ValueError(f"no token account of {wallet} has symbol {want} "
+                         "(closed accounts can't be listed — pass the full mint)")
+    raise ValueError(f"symbol {want} matches several mints: {', '.join(hits)} "
+                     "— pass the full mint")
+
+
 def reconcile(rpc: SolRpc, address: str, mint: str | None = None,
               wallets: int = DEFAULT_WALLETS) -> dict:
     t0 = time.time()
     kind, acc = classify_address(rpc, address)
+    if mint and kind == "wallet":
+        mint = resolve_mint(rpc, address, mint)
     symbols = _symbol_map()
     ledgers: list[WalletLedger] = []
     notes: list[str] = []
@@ -547,6 +572,8 @@ def feeder_check(rpc: SolRpc, holder: str, mint: str | None = None,
     market, and do sent/received amounts match. Also whether the holder's
     first SOL came from that sender (same-operator evidence)."""
     symbols = _symbol_map()
+    if mint:
+        mint = resolve_mint(rpc, holder, mint)
     held = [] if mint else [a["mint"] for a in rpc.token_accounts(holder)]
     mints = [mint] if mint else held[:max_mints]
     skipped = max(0, len(held) - len(mints))
@@ -757,13 +784,20 @@ def render_text(d: dict) -> str:
         body += render_ledger(l) + [""]
     if not d["ledgers"]:
         body.append("no wallets to reconcile (no pool found / no token accounts)")
+    legend = {l["mint"]: l["symbol"] for l in d["ledgers"]}
+    legend.update({m: sym for m, sym in _sym_cache.items() if sym})
+    if legend:
+        body.append("mints referenced (full addresses for --mint):")
+        for m, sym in sorted(legend.items(), key=lambda kv: str(kv[1])):
+            body.append(f"  {sym:<12} {m}")
     return "\n".join(body)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("address")
-    ap.add_argument("--mint", help="when address is a wallet: the token to reconcile")
+    ap.add_argument("--mint", help="when address is a wallet: the token to "
+                                   "reconcile — full mint or its ticker (e.g. HOTBOT)")
     ap.add_argument("--wallets", type=int, default=DEFAULT_WALLETS)
     ap.add_argument("--debug", action="store_true",
                     help="progress on stderr + RPC diagnostics for unfetchable txs")
