@@ -436,6 +436,100 @@ def reconcile(rpc: SolRpc, address: str, mint: str | None = None,
             "notes": notes, "elapsed": round(time.time() - t0, 1)}
 
 
+# ------------------------------------------------- feeder (hot→cold) check
+def feeder_check(rpc: SolRpc, holder: str, mint: str | None = None,
+                 max_mints: int = 6) -> dict:
+    """Is `holder` a holding wallet fed by a trading wallet? For each mint
+    the holder has: who sent it tokens, did that sender BUY them on the
+    market, and do sent/received amounts match. Also whether the holder's
+    first SOL came from that sender (same-operator evidence)."""
+    symbols = _symbol_map()
+    mints = [mint] if mint else [a["mint"] for a in rpc.token_accounts(holder)][:max_mints]
+    rows = []
+    for m in mints:
+        macc = rpc.account_info(m)
+        if not macc:
+            continue
+        try:
+            mi = parse_mint(m, macc)
+        except ValueError:
+            continue
+        sym = symbols.get(m) or _dex_symbol(m) or m[:4] + "…"
+        led_h = reconcile_wallet(rpc, holder, m, mi, symbols, "holder")
+        feeders: dict[str, float] = defaultdict(float)
+        for e in led_h.events:
+            if e.kind == "transfer_in" and e.counterparty:
+                feeders[e.counterparty] += e.tokens
+        if not feeders:
+            rows.append({"mint": m, "symbol": sym, "holder_bought": led_h.bought,
+                         "holder_received": led_h.received, "feeder": None,
+                         "verdict": ("holder bought this itself" if led_h.bought
+                                     else "no inbound transfers found")})
+            continue
+        feeder, amount = max(feeders.items(), key=lambda kv: kv[1])
+        led_f = reconcile_wallet(rpc, feeder, m, mi, symbols, "feeder")
+        sent_to_holder = sum(-e.tokens for e in led_f.events
+                             if e.kind == "transfer_out" and e.counterparty == holder)
+        match = abs(sent_to_holder - amount) <= max(1e-6 * max(amount, 1), 10 ** -mi.decimals)
+        if led_f.bought > 0 and led_h.bought == 0 and match:
+            verdict = "CONFIRMED: feeder bought on market, holder only received"
+        elif led_f.bought > 0 and led_h.bought == 0:
+            verdict = ("feeder buys, holder only receives — but sent/received "
+                       "amounts differ (other recipients or truncated history)")
+        elif led_f.received > 0 and led_f.bought == 0:
+            verdict = "feeder is itself a pass-through (received, did not buy) — trace one hop further"
+        else:
+            verdict = "not a clean hot→cold pattern: " + (
+                "holder also buys" if led_h.bought else "feeder shows no purchases")
+        rows.append({"mint": m, "symbol": sym, "holder_bought": led_h.bought,
+                     "holder_received": led_h.received, "feeder": feeder,
+                     "feeder_bought": led_f.bought, "feeder_buys": led_f.buys,
+                     "feeder_outlay": led_f.outlay, "feeder_sold": led_f.sold,
+                     "feeder_sent_to_holder": sent_to_holder,
+                     "feeder_holds": led_f.balance_now,
+                     "feeder_unfetchable": led_f.txs_unfetchable,
+                     "holder_unfetchable": led_h.txs_unfetchable,
+                     "verdict": verdict})
+    # same-operator evidence: who gave the holder its first SOL?
+    sol_funder = None
+    try:
+        page = rpc.signatures(holder, limit=1000)
+        if page and len(page) < 1000:
+            from .report import _inbound_funder
+            tx = rpc.transaction(page[-1]["signature"])
+            if tx:
+                sol_funder = _inbound_funder(tx, holder)
+    except Exception:
+        pass
+    feeders_seen = {r["feeder"] for r in rows if r.get("feeder")}
+    return {"holder": holder, "rows": rows, "sol_funder": sol_funder,
+            "sol_funder_is_feeder": bool(sol_funder and sol_funder in feeders_seen)}
+
+
+def render_feeders(d: dict) -> str:
+    out = [f"=== feeder check — is {d['holder']} a holding wallet fed by a trader? ===", ""]
+    for r in d["rows"]:
+        out.append(f"{r['symbol']} {r['mint']}")
+        out.append(f"    holder: bought {_fmt(r['holder_bought'])}, received {_fmt(r['holder_received'])}")
+        if r.get("feeder"):
+            out.append(f"    feeder {r['feeder']}: {r['feeder_buys']} purchases = "
+                       f"{_fmt(r['feeder_bought'])} (outlay {_flows(r['feeder_outlay'])}), "
+                       f"sold {_fmt(r['feeder_sold'])}, sent {_fmt(r['feeder_sent_to_holder'])} "
+                       f"to holder, still holds {_fmt(r['feeder_holds'])}")
+            if r.get("feeder_unfetchable") or r.get("holder_unfetchable"):
+                out.append(f"    [note] unfetchable txs — feeder {r.get('feeder_unfetchable', 0)}, "
+                           f"holder {r.get('holder_unfetchable', 0)}; verdict is on fetched data only")
+        out.append(f"    → {r['verdict']}")
+        out.append("")
+    if d.get("sol_funder"):
+        out.append(f"holder's first SOL came from {d['sol_funder']}"
+                   + (" — the feeder itself: same operator, hot→cold wallet pair"
+                      if d["sol_funder_is_feeder"] else " (not the feeder)"))
+    else:
+        out.append("holder's first SOL funder: not determined (deep history or no inbound found)")
+    return "\n".join(out)
+
+
 def _dex_symbol(mint: str) -> str | None:
     try:
         pairs = [p for p in dexscreener.token_pairs(mint)
@@ -533,11 +627,17 @@ def main() -> int:
     ap.add_argument("address")
     ap.add_argument("--mint", help="when address is a wallet: the token to reconcile")
     ap.add_argument("--wallets", type=int, default=DEFAULT_WALLETS)
+    ap.add_argument("--feeders", action="store_true",
+                    help="wallet address: verify it is a holding wallet fed by "
+                         "a trading wallet (who sent, did they buy, do amounts match)")
     a = ap.parse_args()
     if not b58.looks_like_address(a.address):
         print("not a base58 Solana address", file=sys.stderr)
         return 2
     try:
+        if a.feeders:
+            print(render_feeders(feeder_check(SolRpc(), a.address, a.mint)))
+            return 0
         print(render_text(reconcile(SolRpc(), a.address, a.mint, a.wallets)))
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

@@ -161,12 +161,15 @@ class SolRpc:
             except SolRpcError:
                 continue
             for acc in (res or {}).get("value") or []:
-                info = acc["account"]["data"]["parsed"]["info"]
-                ta = info["tokenAmount"]
-                out.append({"pubkey": acc["pubkey"], "mint": info["mint"],
-                            "amount": int(ta["amount"]),
-                            "decimals": int(ta.get("decimals") or 0),
-                            "program": prog})
+                try:
+                    info = acc["account"]["data"]["parsed"]["info"]
+                    ta = info["tokenAmount"]
+                    out.append({"pubkey": acc["pubkey"], "mint": info["mint"],
+                                "amount": int(ta["amount"]),
+                                "decimals": int(ta.get("decimals") or 0),
+                                "program": prog})
+                except (KeyError, TypeError, ValueError):
+                    continue          # unparsed account (odd extension set)
         return out
 
     def token_balance(self, owner: str, mint: str) -> int:
