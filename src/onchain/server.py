@@ -550,11 +550,23 @@ class Handler(BaseHTTPRequestHandler):
                 from ..solana import report as _sol
                 if _b58.looks_like_address(token):
                     try:
+                        if req.get("mode") == "reconcile":
+                            from ..solana import reconcile as _rec
+                            from ..solana.rpc import SolRpc as _SolRpc
+                            payload = _rec.reconcile(
+                                _SolRpc(), token,
+                                (req.get("mint") or "").strip() or None)
+                            payload["text"] = _rec.render_text(payload)
+                            payload["verdict"] = {"score": 0}
+                            self._json(200, payload)
+                            return
                         payload = _sol.collect(token)
                         payload["text"] = _sol.render_text(payload)
                         self._json(200, payload)
                     except _sol.NoPairError as exc:
                         self._json(404, {"error": str(exc)})
+                    except ValueError as exc:      # reconcile: not mint/wallet
+                        self._json(400, {"error": str(exc)})
                     except SystemExit as exc:   # SOLANA_RPC_URL missing
                         self._json(400, {"error": str(exc)})
                     except Exception as exc:

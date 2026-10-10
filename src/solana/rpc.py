@@ -124,6 +124,27 @@ class SolRpc:
     def token_largest(self, mint: str) -> list[dict]:
         return (self.call("getTokenLargestAccounts", [mint]) or {}).get("value") or []
 
+    def token_accounts(self, owner: str) -> list[dict]:
+        """All of `owner`'s token accounts (both token programs), jsonParsed:
+        [{pubkey, mint, amount(raw), decimals, program}]."""
+        out: list[dict] = []
+        for prog in ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"):
+            try:
+                res = self.call("getTokenAccountsByOwner",
+                                [owner, {"programId": prog},
+                                 {"encoding": "jsonParsed"}])
+            except SolRpcError:
+                continue
+            for acc in (res or {}).get("value") or []:
+                info = acc["account"]["data"]["parsed"]["info"]
+                ta = info["tokenAmount"]
+                out.append({"pubkey": acc["pubkey"], "mint": info["mint"],
+                            "amount": int(ta["amount"]),
+                            "decimals": int(ta.get("decimals") or 0),
+                            "program": prog})
+        return out
+
     def token_balance(self, owner: str, mint: str) -> int:
         """Current raw balance of `owner` in `mint`, summed over accounts."""
         out = self.call("getTokenAccountsByOwner",

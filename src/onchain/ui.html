@@ -99,6 +99,8 @@
     <input id="token" placeholder="0x… token address" autocomplete="off" spellcheck="false">
     <input id="pair" placeholder="pair/curve (optional)" autocomplete="off" spellcheck="false">
     <button class="action" id="go" type="submit">Scan</button>
+    <button class="action" id="recon" type="button"
+      title="Solana only: reconcile every movement of the token through the key wallets (creator, top holders, early buyers) — or paste a wallet address">Reconcile wallets</button>
   </form>
   <div id="result">Paste a contract address, or click one anywhere in the app.
 Full pipeline: contract flags, launch window, clusters, holders. Usually 10–30s.</div>
@@ -363,12 +365,19 @@ $("#venuefilter").addEventListener("change", () => {
   catch (e) {}
   refresh();
 });
+let scanMode = "scan";
+$("#recon").addEventListener("click", () => {
+  scanMode = "reconcile"; $("#scanform").requestSubmit();
+});
 $("#scanform").addEventListener("submit", async e => {
   e.preventDefault();
-  const btn = $("#go"); btn.disabled = true;
-  $("#result").textContent = "scanning… (usually 10–30s)";
+  const mode = scanMode; scanMode = "scan";
+  const btn = $("#go"); btn.disabled = true; $("#recon").disabled = true;
+  $("#result").textContent = mode === "reconcile"
+    ? "reconciling wallets… (30–90s: full token-account histories)"
+    : "scanning… (usually 10–30s)";
   try {
-    const body = { token: $("#token").value.trim(),
+    const body = { token: $("#token").value.trim(), mode,
                    pair: $("#pair").value.trim(),
                    creation_block: $("#scanform").dataset.creationBlock || null };
     const r = await fetch("/api/scan", { method:"POST",
@@ -377,7 +386,8 @@ $("#scanform").addEventListener("submit", async e => {
     if (d.error) { $("#result").textContent = "error: " + d.error; return; }
     render(d);
   } catch (err) { $("#result").textContent = "request failed: " + err; }
-  finally { btn.disabled = false; $("#scanform").dataset.creationBlock = ""; }
+  finally { btn.disabled = false; $("#recon").disabled = false;
+            $("#scanform").dataset.creationBlock = ""; }
 });
 
 function render(d) {
