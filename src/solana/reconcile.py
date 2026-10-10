@@ -45,7 +45,23 @@ LP_PROGRAMS.update({
     "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB": "Meteora Dynamic AMM",
     "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc": "Orca Whirlpool",
     "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "Jupiter v6",
+    "DCA265Vj8a9CEuX1eb1LWRnDT7uK6q1xMipnNyatn23M": "Jupiter DCA",
+    "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X": "Jupiter Limit Order",
 })
+_cp_type_cache: dict[str, str] = {}
+
+
+def counterparty_type(rpc: SolRpc, address: str) -> str:
+    """'wallet' (System-owned, a person can sign) or 'protocol' (program-
+    owned account / PDA authority: DEX vault, DCA or limit-order engine,
+    staking). Cached per process."""
+    if address not in _cp_type_cache:
+        try:
+            kind, _ = classify_address(rpc, address)
+            _cp_type_cache[address] = "wallet" if kind == "wallet" else "protocol"
+        except Exception:
+            _cp_type_cache[address] = "unknown"
+    return _cp_type_cache[address]
 SOL_NOISE = 0.005          # SOL moves below this are fees/rent, not a trade
 MAX_SIG_PAGES = 5          # 5,000 signatures per token account
 MAX_TXS = 600              # transactions fetched per wallet×mint
@@ -81,8 +97,11 @@ class WalletLedger:
     events: list = field(default_factory=list)
     bought: float = 0.0
     sold: float = 0.0
-    received: float = 0.0
-    sent: float = 0.0
+    received: float = 0.0          # from WALLETS (transfers)
+    sent: float = 0.0              # to WALLETS
+    protocol_in: float = 0.0       # from protocol accounts: DCA/limit fills,
+                                   # claims — the holder is the acquirer
+    protocol_out: float = 0.0      # to protocol accounts: escrows, deposits
     lp_deposited: float = 0.0
     lp_withdrawn: float = 0.0
     burned: float = 0.0
@@ -97,8 +116,9 @@ class WalletLedger:
     last_ts: int = 0
 
     def expected_balance(self) -> float:
-        return (self.bought + self.received + self.lp_withdrawn
-                - self.sold - self.sent - self.lp_deposited - self.burned)
+        return (self.bought + self.received + self.protocol_in + self.lp_withdrawn
+                - self.sold - self.sent - self.protocol_out - self.lp_deposited
+                - self.burned)
 
 
 # ----------------------------------------------------------------- helpers
@@ -305,6 +325,11 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
             want = (lambda v: v < 0) if kind == "transfer_in" else (lambda v: v > 0)
             cands = [o for o, v in others.items() if want(v)]
             cp = cands[0] if cands else ""
+            if cp and counterparty_type(rpc, cp) == "protocol":
+                # tokens arriving from / leaving to a program-owned account
+                # with no payment leg = order fill, claim, escrow, deposit —
+                # not a wallet-to-wallet transfer
+                kind = "protocol_in" if kind == "transfer_in" else "protocol_out"
 
         ev = Event(sig=sig["signature"], ts=ts, kind=kind, tokens=d_tok,
                    flows=flows, counterparty=cp, programs=lp)
@@ -325,6 +350,10 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
             led.received += d_tok
         elif kind == "transfer_out":
             led.sent += -d_tok
+        elif kind == "protocol_in":
+            led.protocol_in += d_tok
+        elif kind == "protocol_out":
+            led.protocol_out += -d_tok
         elif kind == "lp_deposit":
             led.lp_deposited += -d_tok
         elif kind == "lp_withdraw":
@@ -438,13 +467,15 @@ def reconcile(rpc: SolRpc, address: str, mint: str | None = None,
 
 # ------------------------------------------------- feeder (hot→cold) check
 def feeder_check(rpc: SolRpc, holder: str, mint: str | None = None,
-                 max_mints: int = 6) -> dict:
+                 max_mints: int = 10) -> dict:
     """Is `holder` a holding wallet fed by a trading wallet? For each mint
     the holder has: who sent it tokens, did that sender BUY them on the
     market, and do sent/received amounts match. Also whether the holder's
     first SOL came from that sender (same-operator evidence)."""
     symbols = _symbol_map()
-    mints = [mint] if mint else [a["mint"] for a in rpc.token_accounts(holder)][:max_mints]
+    held = [] if mint else [a["mint"] for a in rpc.token_accounts(holder)]
+    mints = [mint] if mint else held[:max_mints]
+    skipped = max(0, len(held) - len(mints))
     rows = []
     for m in mints:
         macc = rpc.account_info(m)
@@ -461,17 +492,29 @@ def feeder_check(rpc: SolRpc, holder: str, mint: str | None = None,
             if e.kind == "transfer_in" and e.counterparty:
                 feeders[e.counterparty] += e.tokens
         if not feeders:
+            if led_h.protocol_in and not led_h.bought:
+                verdict = ("holder acquired via protocol fills/claims (DCA, "
+                           "limit orders, staking) — the holder IS the "
+                           "acquirer; no feeding wallet")
+            elif led_h.bought:
+                verdict = "holder bought this itself"
+            else:
+                verdict = "no inbound transfers found"
             rows.append({"mint": m, "symbol": sym, "holder_bought": led_h.bought,
-                         "holder_received": led_h.received, "feeder": None,
-                         "verdict": ("holder bought this itself" if led_h.bought
-                                     else "no inbound transfers found")})
+                         "holder_received": led_h.received,
+                         "holder_protocol_in": led_h.protocol_in,
+                         "feeder": None, "verdict": verdict})
             continue
         feeder, amount = max(feeders.items(), key=lambda kv: kv[1])
         led_f = reconcile_wallet(rpc, feeder, m, mi, symbols, "feeder")
         sent_to_holder = sum(-e.tokens for e in led_f.events
                              if e.kind == "transfer_out" and e.counterparty == holder)
         match = abs(sent_to_holder - amount) <= max(1e-6 * max(amount, 1), 10 ** -mi.decimals)
-        if led_f.bought > 0 and led_h.bought == 0 and match:
+        multi_asset = len(led_f.outlay) > 4
+        if multi_asset:
+            verdict = (f"feeder trades in {len(led_f.outlay)} currencies — a "
+                       "market-making/protocol entity, not a personal hot wallet")
+        elif led_f.bought > 0 and led_h.bought == 0 and match:
             verdict = "CONFIRMED: feeder bought on market, holder only received"
         elif led_f.bought > 0 and led_h.bought == 0:
             verdict = ("feeder buys, holder only receives — but sent/received "
@@ -503,14 +546,21 @@ def feeder_check(rpc: SolRpc, holder: str, mint: str | None = None,
         pass
     feeders_seen = {r["feeder"] for r in rows if r.get("feeder")}
     return {"holder": holder, "rows": rows, "sol_funder": sol_funder,
+            "skipped_mints": skipped,
             "sol_funder_is_feeder": bool(sol_funder and sol_funder in feeders_seen)}
 
 
 def render_feeders(d: dict) -> str:
-    out = [f"=== feeder check — is {d['holder']} a holding wallet fed by a trader? ===", ""]
+    out = [f"=== feeder check — is {d['holder']} a holding wallet fed by a trader? ==="]
+    if d.get("skipped_mints"):
+        out.append(f"[note] {d['skipped_mints']} further holding(s) not checked — "
+                   "run with --mint <token> for a specific one")
+    out.append("")
     for r in d["rows"]:
         out.append(f"{r['symbol']} {r['mint']}")
         out.append(f"    holder: bought {_fmt(r['holder_bought'])}, received {_fmt(r['holder_received'])}")
+        if r.get("holder_protocol_in"):
+            out.append(f"    holder received {_fmt(r['holder_protocol_in'])} via protocol fills/claims")
         if r.get("feeder"):
             out.append(f"    feeder {r['feeder']}: {r['feeder_buys']} purchases = "
                        f"{_fmt(r['feeder_bought'])} (outlay {_flows(r['feeder_outlay'])}), "
@@ -549,6 +599,11 @@ def _fmt(v: float) -> str:
 
 
 def _flows(d: dict) -> str:
+    if len(d) > 4:                 # a person pays in one or two currencies
+        majors = {c: v for c, v in d.items() if c in ("SOL", "USDC", "USDT")}
+        return (" + ".join(f"{_fmt(v)} {c}" for c, v in sorted(majors.items()))
+                + (" + " if majors else "")
+                + f"{len(d) - len(majors)} other tokens (multi-asset entity)")
     return " + ".join(f"{_fmt(v)} {c}" for c, v in sorted(d.items())) or "—"
 
 
@@ -576,7 +631,11 @@ def render_ledger(l: dict) -> list[str]:
            f"    {l['buys']} purchases: {_fmt(l['bought'])} {sym}   outlay {_flows(l['outlay'])}",
            f"    {l['sells']} sales:     {_fmt(l['sold'])} {sym}   receipts {_flows(l['receipts'])}"]
     if l["received"] or l["sent"]:
-        out.append(f"    transfers: +{_fmt(l['received'])} in, -{_fmt(l['sent'])} out {sym}")
+        out.append(f"    wallet transfers: +{_fmt(l['received'])} in, -{_fmt(l['sent'])} out {sym}")
+    if l.get("protocol_in") or l.get("protocol_out"):
+        out.append(f"    protocol fills/claims: +{_fmt(l.get('protocol_in', 0))} in, "
+                   f"escrows/deposits: -{_fmt(l.get('protocol_out', 0))} out {sym} "
+                   "(order fills — holder is the acquirer)")
     if l["lp_deposited"] or l["lp_withdrawn"]:
         out.append(f"    liquidity: {_fmt(l['lp_deposited'])} deposited, "
                    f"{_fmt(l['lp_withdrawn'])} withdrawn {sym}")
@@ -593,7 +652,8 @@ def render_ledger(l: dict) -> list[str]:
                   + ")"))
     notable = [e for e in l["events"]
                if e["kind"] in ("lp_deposit", "lp_withdraw", "burn",
-                                "transfer_in", "transfer_out")]
+                                "transfer_in", "transfer_out",
+                                "protocol_in", "protocol_out")]
     if notable:
         out.append("    notable movements:")
         for e in notable[:12]:
