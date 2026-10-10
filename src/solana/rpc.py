@@ -39,6 +39,7 @@ class SolRpc:
         self.url = url or require_url()
         self._session = requests.Session()
         self._id = 0
+        self.last_errors: list[str] = []   # per-item batch / retry errors
 
     def clone(self) -> "SolRpc":
         """Fresh session for a worker thread (requests.Session is not
@@ -73,8 +74,31 @@ class SolRpc:
             for j in range(len(chunk)):
                 item = by_id.get(j) or {}
                 results.append(item.get("result"))
+                if item.get("error"):
+                    self.last_errors.append(str(item["error"])[:200])
             time.sleep(0.05)
         return results
+
+    def transaction(self, sig: str, retries: int = 3) -> dict | None:
+        """Single getTransaction with backoff — the fallback when a batch
+        item came back empty (rate limit / batch rejection), so a missing
+        transaction is a fact about the chain, not about the burst."""
+        cfg = {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
+               "commitment": "confirmed"}
+        for attempt in range(retries):
+            try:
+                return self.call("getTransaction", [sig, cfg])
+            except Exception as exc:
+                self.last_errors.append(str(exc)[:200])
+                time.sleep(0.4 * (attempt + 1))
+        return None
+
+    def token_accounts_for_mint(self, owner: str, mint: str) -> list[str]:
+        """Token account pubkeys `owner` holds for `mint` (mint filter — the
+        query the balance check already relies on)."""
+        out = self.call("getTokenAccountsByOwner",
+                        [owner, {"mint": mint}, {"encoding": "jsonParsed"}])
+        return [acc["pubkey"] for acc in (out or {}).get("value") or []]
 
     # --- history ---
     def signatures(self, address: str, before: str | None = None,

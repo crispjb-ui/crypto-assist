@@ -212,11 +212,10 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
     # derived ATA (reachable even if closed); histories merged
     accounts = {led.ata}
     try:
-        for a in rpc.token_accounts(wallet):
-            if a["mint"] == mint:
-                accounts.add(a["pubkey"])
-    except Exception:
-        pass
+        accounts.update(rpc.token_accounts_for_mint(wallet, mint))
+    except Exception as exc:
+        led.notes.append(f"could not list token accounts ({str(exc)[:80]}) "
+                         "— derived ATA only")
     led.accounts = sorted(accounts)
     sigs: list[dict] = []
     seen_sigs: set[str] = set()
@@ -237,12 +236,19 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
         sigs = sigs[-MAX_TXS:]            # newest window; flagged in output
         led.history_complete = False
     led.txs_fetched = len(sigs)
+    rpc.last_errors = []
     txs = rpc.transactions([sg["signature"] for sg in sigs]) if sigs else []
+    # batch items can come back empty under rate limiting / batch rejection;
+    # retry those one at a time before calling anything unfetchable
+    for i, t in enumerate(txs):
+        if not t:
+            txs[i] = rpc.transaction(sigs[i]["signature"])
     led.txs_unfetchable = sum(1 for t in txs if not t)
     if led.txs_unfetchable:
+        why = rpc.last_errors[-1] if rpc.last_errors else "no error text returned"
         led.notes.append(f"{led.txs_unfetchable}/{led.txs_fetched} transactions "
-                         "returned nothing from the RPC (older history the "
-                         "node does not serve) — totals exclude them")
+                         f"unfetchable after single retries — RPC said: {why}"
+                         " — totals exclude them")
 
     net: dict[str, float] = defaultdict(float)
     for sig, tx in zip(sigs, txs):
