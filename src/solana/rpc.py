@@ -46,11 +46,11 @@ class SolRpc:
         thread-safe to share)."""
         return SolRpc(self.url)
 
-    def call(self, method: str, params: list):
+    def call(self, method: str, params: list, timeout: float = DEFAULT_TIMEOUT):
         self._id += 1
         body = {"jsonrpc": "2.0", "id": self._id, "method": method,
                 "params": params}
-        resp = self._session.post(self.url, json=body, timeout=DEFAULT_TIMEOUT)
+        resp = self._session.post(self.url, json=body, timeout=timeout)
         resp.raise_for_status()
         out = resp.json()
         if "error" in out:
@@ -87,11 +87,41 @@ class SolRpc:
                "commitment": "confirmed"}
         for attempt in range(retries):
             try:
-                return self.call("getTransaction", [sig, cfg])
+                res = self.call("getTransaction", [sig, cfg], timeout=12)
+                if res is None:
+                    self.last_errors.append(f"getTransaction returned null for {sig[:12]}…")
+                return res
             except Exception as exc:
                 self.last_errors.append(str(exc)[:200])
                 time.sleep(0.4 * (attempt + 1))
         return None
+
+    def probe_transaction(self, sig: str) -> dict:
+        """Diagnostic: the raw outcome of several getTransaction variants for
+        one signature, to tell 'node has no record' from 'encoding/version
+        rejected' from 'rate limited'."""
+        out: dict = {}
+        variants = {
+            "jsonParsed+v0": {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+            "json+v0": {"encoding": "json", "maxSupportedTransactionVersion": 0},
+            "jsonParsed-no-version": {"encoding": "jsonParsed"},
+            "jsonParsed+finalized": {"encoding": "jsonParsed",
+                                     "maxSupportedTransactionVersion": 0,
+                                     "commitment": "finalized"},
+        }
+        for name, cfg in variants.items():
+            try:
+                res = self.call("getTransaction", [sig, cfg], timeout=15)
+                if res is None:
+                    out[name] = "null (node returned no record)"
+                else:
+                    meta = res.get("meta") or {}
+                    out[name] = (f"OK slot={res.get('slot')} version="
+                                 f"{res.get('version')} err={meta.get('err')}")
+            except Exception as exc:
+                out[name] = f"ERROR {str(exc)[:160]}"
+            time.sleep(0.3)
+        return out
 
     def token_accounts_for_mint(self, owner: str, mint: str) -> list[str]:
         """Token account pubkeys `owner` holds for `mint` (mint filter — the

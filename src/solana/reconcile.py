@@ -63,6 +63,13 @@ def counterparty_type(rpc: SolRpc, address: str) -> str:
             _cp_type_cache[address] = "unknown"
     return _cp_type_cache[address]
 SOL_NOISE = 0.005          # SOL moves below this are fees/rent, not a trade
+RETRY_BUDGET = 8           # consecutive single-fetch failures before giving up
+VERBOSE = False            # --debug: progress + diagnostics on stderr
+
+
+def _log(msg: str) -> None:
+    if VERBOSE:
+        print(msg, file=sys.stderr, flush=True)
 MAX_SIG_PAGES = 5          # 5,000 signatures per token account
 MAX_TXS = 600              # transactions fetched per wallet×mint
 DEFAULT_WALLETS = 6
@@ -257,18 +264,37 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
         led.history_complete = False
     led.txs_fetched = len(sigs)
     rpc.last_errors = []
+    _log(f"  {wallet[:8]}… {mint[:6]}…: {len(led.accounts)} account(s), "
+         f"{led.txs_fetched} txs to fetch")
     txs = rpc.transactions([sg["signature"] for sg in sigs]) if sigs else []
+    empties = [i for i, t in enumerate(txs) if not t]
+    if empties:
+        _log(f"    batch returned {len(empties)} empty — retrying singly "
+             f"(budget {RETRY_BUDGET} consecutive failures)")
     # batch items can come back empty under rate limiting / batch rejection;
-    # retry those one at a time before calling anything unfetchable
-    for i, t in enumerate(txs):
-        if not t:
-            txs[i] = rpc.transaction(sigs[i]["signature"])
+    # retry those one at a time, but a node that keeps failing must not stall
+    # the whole run — stop after RETRY_BUDGET consecutive failures
+    consecutive = 0
+    for n, i in enumerate(empties, 1):
+        if consecutive >= RETRY_BUDGET:
+            break
+        txs[i] = rpc.transaction(sigs[i]["signature"])
+        consecutive = 0 if txs[i] else consecutive + 1
+        if n % 10 == 0:
+            _log(f"    retried {n}/{len(empties)}")
     led.txs_unfetchable = sum(1 for t in txs if not t)
     if led.txs_unfetchable:
         why = rpc.last_errors[-1] if rpc.last_errors else "no error text returned"
+        samples = [sigs[i]["signature"] for i, t in enumerate(txs) if not t][:3]
         led.notes.append(f"{led.txs_unfetchable}/{led.txs_fetched} transactions "
-                         f"unfetchable after single retries — RPC said: {why}"
-                         " — totals exclude them")
+                         f"unfetchable — RPC said: {why}"
+                         + (" (retry budget exhausted)" if consecutive >= RETRY_BUDGET else "")
+                         + " — totals exclude them; sample signatures: "
+                         + ", ".join(samples))
+        if VERBOSE and samples:
+            _log(f"    probing {samples[0][:16]}…:")
+            for k, v in rpc.probe_transaction(samples[0]).items():
+                _log(f"      {k:<24} {v}")
 
     net: dict[str, float] = defaultdict(float)
     for sig, tx in zip(sigs, txs):
@@ -531,6 +557,7 @@ def feeder_check(rpc: SolRpc, holder: str, mint: str | None = None,
                      "feeder_sent_to_holder": sent_to_holder,
                      "feeder_holds": led_f.balance_now,
                      "feeder_unfetchable": led_f.txs_unfetchable,
+                     "feeder_notes": led_f.notes,
                      "holder_unfetchable": led_h.txs_unfetchable,
                      "verdict": verdict})
     # same-operator evidence: who gave the holder its first SOL?
@@ -569,6 +596,8 @@ def render_feeders(d: dict) -> str:
             if r.get("feeder_unfetchable") or r.get("holder_unfetchable"):
                 out.append(f"    [note] unfetchable txs — feeder {r.get('feeder_unfetchable', 0)}, "
                            f"holder {r.get('holder_unfetchable', 0)}; verdict is on fetched data only")
+                for n in r.get("feeder_notes") or []:
+                    out.append(f"    [note] feeder: {n}")
         out.append(f"    → {r['verdict']}")
         out.append("")
     if d.get("sol_funder"):
@@ -687,10 +716,19 @@ def main() -> int:
     ap.add_argument("address")
     ap.add_argument("--mint", help="when address is a wallet: the token to reconcile")
     ap.add_argument("--wallets", type=int, default=DEFAULT_WALLETS)
+    ap.add_argument("--debug", action="store_true",
+                    help="progress on stderr + RPC diagnostics for unfetchable txs")
+    ap.add_argument("--probe-sig", help="diagnose one transaction signature and exit")
     ap.add_argument("--feeders", action="store_true",
                     help="wallet address: verify it is a holding wallet fed by "
                          "a trading wallet (who sent, did they buy, do amounts match)")
     a = ap.parse_args()
+    global VERBOSE
+    VERBOSE = a.debug
+    if a.probe_sig:
+        for k, v in SolRpc().probe_transaction(a.probe_sig).items():
+            print(f"{k:<24} {v}")
+        return 0
     if not b58.looks_like_address(a.address):
         print("not a base58 Solana address", file=sys.stderr)
         return 2
