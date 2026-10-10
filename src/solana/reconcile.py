@@ -185,12 +185,20 @@ def _burned_by(tx: dict, wallet: str, mint: str, decimals: int) -> float:
     return total / 10 ** decimals
 
 
+_sym_cache: dict[str, str | None] = {}
+
+
 def _label_currency(mint: str, symbols: dict[str, str]) -> str:
     if mint == "SOL" or mint == WSOL_MINT:
         return "SOL"
     if mint == USDC_MINT:
         return "USDC"
-    return symbols.get(mint) or mint[:4] + "…" + mint[-4:]
+    if mint in symbols:
+        return symbols[mint]
+    if mint not in _sym_cache:            # one DexScreener lookup per mint
+        _sym_cache[mint] = _dex_symbol(mint)
+    sym = _sym_cache[mint]
+    return f"{sym} ({mint[:4]}…{mint[-4:]})" if sym else mint[:4] + "…" + mint[-4:]
 
 
 # ------------------------------------------------------------- the engine
