@@ -70,9 +70,14 @@ class WalletLedger:
     symbol: str = "?"
     role: str = ""
     ata: str = ""
+    owner_type: str = "wallet"     # wallet | program-owned | unknown
+    accounts: list = field(default_factory=list)   # token accounts covered
     history_complete: bool = True
     txs_seen: int = 0
     txs_fetched: int = 0
+    txs_unfetchable: int = 0       # RPC returned nothing for these
+    txs_failed: int = 0            # on-chain failed transactions, ignored
+    notes: list = field(default_factory=list)
     events: list = field(default_factory=list)
     bought: float = 0.0
     sold: float = 0.0
@@ -190,15 +195,54 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
     led.ata = associated_token_address(wallet, mint, token_program)
     dec = mint_info.decimals
 
-    sigs, complete = rpc.signatures_full(led.ata, max_pages=MAX_SIG_PAGES)
-    led.history_complete = complete
-    sigs = [s for s in sigs if not s.get("err")]
+    # who owns the tokens: a human-controlled wallet (System-owned account)
+    # or a program-owned account / PDA (pool vault, locker, staking)? A PDA
+    # authority often has no account at all — that is "program-owned" too.
+    try:
+        kind, acc = classify_address(rpc, wallet)
+        led.owner_type = "wallet" if kind == "wallet" else "program-owned"
+    except Exception:
+        led.owner_type = "unknown"
+    if led.owner_type != "wallet":
+        led.notes.append("owner is not a System-owned wallet — a program-"
+                         "owned account/PDA (pool vault, locker, staking); "
+                         "its flows are protocol mechanics, not a trader")
+
+    # every token account this owner has for the mint (open ones) plus the
+    # derived ATA (reachable even if closed); histories merged
+    accounts = {led.ata}
+    try:
+        for a in rpc.token_accounts(wallet):
+            if a["mint"] == mint:
+                accounts.add(a["pubkey"])
+    except Exception:
+        pass
+    led.accounts = sorted(accounts)
+    sigs: list[dict] = []
+    seen_sigs: set[str] = set()
+    for acct in led.accounts:
+        try:
+            part, complete = rpc.signatures_full(acct, max_pages=MAX_SIG_PAGES)
+        except Exception:
+            continue
+        led.history_complete = led.history_complete and complete
+        for sg in part:
+            if sg["signature"] not in seen_sigs:
+                seen_sigs.add(sg["signature"]); sigs.append(sg)
+    sigs.sort(key=lambda sg: (sg.get("blockTime") or 0, sg.get("slot") or 0))
+    led.txs_failed = sum(1 for sg in sigs if sg.get("err"))
+    sigs = [sg for sg in sigs if not sg.get("err")]
     led.txs_seen = len(sigs)
     if len(sigs) > MAX_TXS:
         sigs = sigs[-MAX_TXS:]            # newest window; flagged in output
         led.history_complete = False
     led.txs_fetched = len(sigs)
-    txs = rpc.transactions([s["signature"] for s in sigs]) if sigs else []
+    txs = rpc.transactions([sg["signature"] for sg in sigs]) if sigs else []
+    led.txs_unfetchable = sum(1 for t in txs if not t)
+    if led.txs_unfetchable:
+        led.notes.append(f"{led.txs_unfetchable}/{led.txs_fetched} transactions "
+                         "returned nothing from the RPC (older history the "
+                         "node does not serve) — totals exclude them")
 
     net: dict[str, float] = defaultdict(float)
     for sig, tx in zip(sigs, txs):
@@ -300,11 +344,13 @@ def _symbol_map() -> dict[str, str]:
         return {}
 
 
-def key_wallets(rpc: SolRpc, mint: str, mint_info, limit: int) -> list[tuple[str, str]]:
+def key_wallets(rpc: SolRpc, mint: str, mint_info, limit: int,
+                notes: list[str] | None = None) -> list[tuple[str, str]]:
     """(wallet, role) candidates for a mint: pool creator, top holders,
-    biggest early buyers — deduped, capped."""
+    biggest early buyers — deduped, capped. Gaps are written to `notes`."""
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
+    notes = notes if notes is not None else []
 
     def add(w: str, role: str) -> None:
         if w and w not in seen and len(out) < limit:
@@ -315,19 +361,28 @@ def key_wallets(rpc: SolRpc, mint: str, mint_info, limit: int) -> list[tuple[str
     if pairs:
         best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
         pool = best.get("pairAddress") or ""
+    else:
+        notes.append("no DexScreener pool — pool creator and early buyers "
+                     "cannot be identified")
     if pool:
         sigs, complete = rpc.signatures_full(pool, max_pages=3)
         if sigs and complete:
             first = rpc.transactions([sigs[0]["signature"]])[0]
             if first:
                 add(_fee_payer(first) or "", "pool creator")
+        else:
+            notes.append("pool history deeper than 3,000 transactions — "
+                         "pool creator not identified")
         from .report import analyze_launch
         try:
             launch = analyze_launch(rpc, mint, pool)
+            if not launch.history_complete:
+                notes.append("pool history too deep to page to creation — "
+                             "early buyers not identified")
             for b in sorted(launch.buyers, key=lambda b: -b.sol_spent)[:3]:
                 add(b.wallet, "early buyer")
-        except Exception:
-            pass
+        except Exception as exc:
+            notes.append(f"early-buyer analysis failed ({exc})")
     largest = rpc.token_largest(mint)
     accounts = [e["address"] for e in largest]
     for entry, acc in zip(largest, rpc.multiple_accounts(accounts) if accounts else []):
@@ -347,10 +402,11 @@ def reconcile(rpc: SolRpc, address: str, mint: str | None = None,
     kind, acc = classify_address(rpc, address)
     symbols = _symbol_map()
     ledgers: list[WalletLedger] = []
+    notes: list[str] = []
     if kind == "mint":
         mint_info = parse_mint(address, acc)
         sym = symbols.get(address) or _dex_symbol(address) or "?"
-        for w, role in key_wallets(rpc, address, mint_info, wallets):
+        for w, role in key_wallets(rpc, address, mint_info, wallets, notes):
             led = reconcile_wallet(rpc, w, address, mint_info, symbols, role)
             led.symbol = sym
             ledgers.append(led)
@@ -371,7 +427,7 @@ def reconcile(rpc: SolRpc, address: str, mint: str | None = None,
         raise ValueError(f"{address} is a {kind}, not a token mint or wallet")
     ledgers.sort(key=lambda l: -sum(v for v in l.net_flow.values() if v > 0))
     return {"subject": subject, "ledgers": [asdict(l) for l in ledgers],
-            "elapsed": round(time.time() - t0, 1)}
+            "notes": notes, "elapsed": round(time.time() - t0, 1)}
 
 
 def _dex_symbol(mint: str) -> str | None:
@@ -402,8 +458,18 @@ def _when(ts: int) -> str:
 
 def render_ledger(l: dict) -> list[str]:
     sym = l["symbol"]
-    out = [f"--- {l['wallet']}  [{l['role']}]  token account {l['ata']}",
-           f"    {l['txs_fetched']} transactions reconciled"
+    kind = l.get("owner_type", "wallet")
+    tag = "" if kind == "wallet" else f" — {kind.upper()} ACCOUNT, not a trader"
+    accts = l.get("accounts") or [l["ata"]]
+    parsed = l["txs_fetched"] - l.get("txs_unfetchable", 0)
+    out = [f"--- {l['wallet']}  [{l['role']}{tag}]",
+           f"    token account(s): {', '.join(accts)}"]
+    for n in l.get("notes") or []:
+        out.append(f"    [note] {n}")
+    out += [f"    {parsed} transactions reconciled"
+           + (f" ({l['txs_unfetchable']} UNFETCHABLE from RPC)"
+              if l.get("txs_unfetchable") else "")
+           + (f", {l['txs_failed']} failed on-chain ignored" if l.get("txs_failed") else "")
            + ("" if l["history_complete"] else
               f" (HISTORY TRUNCATED — {l['txs_seen']} seen; newest window only)")
            + (f", {_when(l['first_ts'])} → {_when(l['last_ts'])}" if l["first_ts"] else ""),
@@ -420,8 +486,11 @@ def render_ledger(l: dict) -> list[str]:
                f"{_flows(l['net_flow'])}")
     out.append(f"    holds now: {_fmt(l['balance_now'])} {sym}"
                + ("" if abs(l["unreconciled"]) < 1e-6 else
-                  f"   UNRECONCILED: {_fmt(l['unreconciled'])} {sym} "
-                  "(movements outside the ATA or truncated history)"))
+                  f"   UNRECONCILED: {_fmt(l['unreconciled'])} {sym} ("
+                  + ("unfetchable transactions" if l.get("txs_unfetchable") else
+                     "truncated history" if not l["history_complete"] else
+                     "movements in accounts this owner no longer holds")
+                  + ")"))
     notable = [e for e in l["events"]
                if e["kind"] in ("lp_deposit", "lp_withdraw", "burn",
                                 "transfer_in", "transfer_out")]
@@ -443,7 +512,9 @@ def render_text(d: dict) -> str:
     head = (f"=== reconciliation — {s.get('symbol', '')} {s['address']} "
             f"[{s['type']}] — {len(d['ledgers'])} wallet(s), {d['elapsed']}s ===")
     body = [head, "cash flows are per currency, never converted; SOL includes "
-                  "fees and rent effects", ""]
+                  "fees and rent effects"]
+    body += [f"[note] {n}" for n in d.get("notes") or []]
+    body.append("")
     for l in d["ledgers"]:
         body += render_ledger(l) + [""]
     if not d["ledgers"]:
