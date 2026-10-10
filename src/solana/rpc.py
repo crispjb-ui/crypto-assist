@@ -20,6 +20,11 @@ DEFAULT_TIMEOUT = 30
 BATCH_MAX = 20          # getTransaction responses are large — keep batches small
 SIG_PAGE_LIMIT = 1000
 MAX_SIG_PAGES = int(os.environ.get("SOLANA_MAX_SIG_PAGES", "10"))
+# Highest transaction version this client accepts. The chain now serves
+# version-1 transactions (modern swaps/routes); declaring 0 made the node
+# refuse them ('Transaction version (1) is not supported by the requesting
+# client') while legacy transfers still came through — a silent blind spot.
+MAX_TX_VERSION = int(os.environ.get("SOLANA_MAX_TX_VERSION", "1"))
 
 
 class SolRpcError(RuntimeError):
@@ -83,7 +88,7 @@ class SolRpc:
         """Single getTransaction with backoff — the fallback when a batch
         item came back empty (rate limit / batch rejection), so a missing
         transaction is a fact about the chain, not about the burst."""
-        cfg = {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
+        cfg = {"encoding": "jsonParsed", "maxSupportedTransactionVersion": MAX_TX_VERSION,
                "commitment": "confirmed"}
         for attempt in range(retries):
             try:
@@ -102,11 +107,11 @@ class SolRpc:
         rejected' from 'rate limited'."""
         out: dict = {}
         variants = {
-            "jsonParsed+v0": {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
-            "json+v0": {"encoding": "json", "maxSupportedTransactionVersion": 0},
+            "jsonParsed+v0": {"encoding": "jsonParsed", "maxSupportedTransactionVersion": MAX_TX_VERSION},
+            "json+v0": {"encoding": "json", "maxSupportedTransactionVersion": MAX_TX_VERSION},
             "jsonParsed-no-version": {"encoding": "jsonParsed"},
             "jsonParsed+finalized": {"encoding": "jsonParsed",
-                                     "maxSupportedTransactionVersion": 0,
+                                     "maxSupportedTransactionVersion": MAX_TX_VERSION,
                                      "commitment": "finalized"},
         }
         for name, cfg in variants.items():
@@ -154,7 +159,7 @@ class SolRpc:
         return list(reversed(pages)), False
 
     def transactions(self, sigs: list[str]) -> list[dict | None]:
-        cfg = {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
+        cfg = {"encoding": "jsonParsed", "maxSupportedTransactionVersion": MAX_TX_VERSION,
                "commitment": "confirmed"}
         return self.batch([("getTransaction", [s, cfg]) for s in sigs])
 
