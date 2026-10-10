@@ -47,7 +47,9 @@ LP_PROGRAMS.update({
     "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "Jupiter v6",
     "DCA265Vj8a9CEuX1eb1LWRnDT7uK6q1xMipnNyatn23M": "Jupiter DCA",
     "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X": "Jupiter Limit Order",
+    "MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms": "Manifest CLOB",
 })
+ORDER_BOOKS = {"Manifest CLOB", "Jupiter Limit Order"}
 _cp_type_cache: dict[str, str] = {}
 
 
@@ -418,6 +420,7 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
             led.last_ts = max(led.last_ts, ts)
     led.net_flow = dict(net)
     _flag_lookalikes(led)
+    _flag_post_cancel_cycles(led)
     try:
         led.balance_now = rpc.token_balance(wallet, mint) / 10 ** dec
     except Exception:
@@ -427,6 +430,45 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
 
 
 LOOKALIKE_PREFIX = 4
+CYCLE_MAX_SECONDS = 6 * 3600
+
+
+def _flag_post_cancel_cycles(led: WalletLedger) -> None:
+    """Tokens sent to a protocol account and returned IN FULL shortly after
+    = an order posted and cancelled unfilled (order book) or a position
+    opened and closed with nothing traded. Repeated, with buying going on at
+    the same time, that is the shape of spoofing — reported as mechanics
+    plus a labeled hypothesis, never as proven intent."""
+    outs = [e for e in led.events if e.kind in ("protocol_out", "lp_deposit")]
+    ins = [e for e in led.events if e.kind in ("protocol_in", "lp_withdraw")]
+    used: set[int] = set()
+    cycles: list[tuple[Event, Event]] = []
+    for o in outs:
+        for j, i in enumerate(ins):
+            if j in used or i.counterparty != o.counterparty:
+                continue
+            if (0 <= i.ts - o.ts <= CYCLE_MAX_SECONDS
+                    and abs(abs(i.tokens) - abs(o.tokens)) <= 1e-6 * max(abs(o.tokens), 1)):
+                used.add(j); cycles.append((o, i)); break
+    if len(cycles) < 2:
+        return
+    total = sum(abs(o.tokens) for o, _ in cycles)
+    span = (min(o.ts for o, _ in cycles), max(i.ts for _, i in cycles))
+    venues = sorted({v for o, _ in cycles for v in o.programs})
+    buys_during = sum(1 for e in led.events
+                      if e.kind == "buy" and span[0] <= e.ts <= span[1])
+    minutes = [round((i.ts - o.ts) / 60) for o, i in cycles]
+    note = (f"POST-AND-CANCEL CYCLES: {len(cycles)} deposits to "
+            f"{cycles[0][0].counterparty} returned in full "
+            f"({_fmt(total)} tokens total, held {min(minutes)}–{max(minutes)} min"
+            + (f", via {', '.join(venues)}" if venues else "")
+            + ") — orders/positions that never filled")
+    if any(v in ORDER_BOOKS for v in venues) and buys_during:
+        note += (f"; {buys_during} market buys executed during the same window "
+                 "— displayed sell size that never trades while accumulating "
+                 "elsewhere is the SPOOFING shape (hypothesis: intent is not "
+                 "on-chain)")
+    led.notes.append(note)
 
 
 def _flag_lookalikes(led: WalletLedger) -> None:
