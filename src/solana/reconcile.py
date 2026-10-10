@@ -71,7 +71,7 @@ def _log(msg: str) -> None:
     if VERBOSE:
         print(msg, file=sys.stderr, flush=True)
 MAX_SIG_PAGES = 5          # 5,000 signatures per token account
-MAX_TXS = 600              # transactions fetched per wallet×mint
+MAX_TXS = 600              # transactions fetched per wallet×mint (--max-txs lifts)
 DEFAULT_WALLETS = 6
 
 
@@ -337,6 +337,15 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
                     _label_currency(m, symbols), 0.0) + v
         progs = _programs(tx)
         lp = [LP_PROGRAMS[p] for p in progs if p in LP_PROGRAMS]
+        if not lp:   # name the unlabeled programs so they can be registered
+            skip = {SYSTEM_PROGRAM, TOKEN_PROGRAM, TOKEN_2022_PROGRAM,
+                    "ComputeBudget111111111111111111111111111111",
+                    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+                    "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"}
+            unlabeled = [f"program {q[:8]}…{q[-4:]}" for q in sorted(progs)
+                         if q not in skip][:2]
+        else:
+            unlabeled = []
         burned = _burned_by(tx, wallet, mint, dec)
         quote_out = any(v < -SOL_NOISE if c == "SOL" else v < 0
                         for c, v in flows.items())
@@ -375,7 +384,8 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
                 kind = "protocol_in" if kind == "transfer_in" else "protocol_out"
 
         ev = Event(sig=sig["signature"], ts=ts, kind=kind, tokens=d_tok,
-                   flows=flows, counterparty=cp, programs=lp)
+                   flows=flows, counterparty=cp,
+                   programs=lp or (unlabeled if kind.startswith(("lp_", "protocol_")) else []))
         led.events.append(ev)
         for c, v in flows.items():
             net[c] += v
@@ -794,11 +804,15 @@ def render_text(d: dict) -> str:
 
 
 def main() -> int:
+    global VERBOSE, MAX_TXS, MAX_SIG_PAGES
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("address")
     ap.add_argument("--mint", help="when address is a wallet: the token to "
                                    "reconcile — full mint or its ticker (e.g. HOTBOT)")
     ap.add_argument("--wallets", type=int, default=DEFAULT_WALLETS)
+    ap.add_argument("--max-txs", type=int, default=None,
+                    help=f"transactions per wallet×mint (default {MAX_TXS}); "
+                         "raise for a full-history run")
     ap.add_argument("--debug", action="store_true",
                     help="progress on stderr + RPC diagnostics for unfetchable txs")
     ap.add_argument("--probe-sig", help="diagnose one transaction signature and exit")
@@ -806,8 +820,10 @@ def main() -> int:
                     help="wallet address: verify it is a holding wallet fed by "
                          "a trading wallet (who sent, did they buy, do amounts match)")
     a = ap.parse_args()
-    global VERBOSE
     VERBOSE = a.debug
+    if a.max_txs:
+        MAX_TXS = a.max_txs
+        MAX_SIG_PAGES = max(MAX_SIG_PAGES, a.max_txs // 1000 + 1)
     if a.probe_sig:
         for k, v in SolRpc().probe_transaction(a.probe_sig).items():
             print(f"{k:<24} {v}")
