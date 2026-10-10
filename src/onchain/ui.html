@@ -227,7 +227,7 @@ async function refreshWatch() {
       if (watchNotified.has(e.sig + e.mint)) continue;
       watchNotified.add(e.sig + e.mint);
       if (watchBaselined && alertsOn &&
-          ["buy", "sell", "transfer_out"].includes(e.kind)) {
+          ["buy", "sell", "transfer_out", "unstake"].includes(e.kind)) {
         const n = new Notification(`WATCH: ${e.text}`, { body: e.mint, tag: e.sig + e.mint });
         n.onclick = () => window.focus();
       }

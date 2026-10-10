@@ -49,7 +49,14 @@ LP_PROGRAMS.update({
     "DCA265Vj8a9CEuX1eb1LWRnDT7uK6q1xMipnNyatn23M": "Jupiter DCA",
     "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X": "Jupiter Limit Order",
     "MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms": "Manifest CLOB",
+    # confirmed by the user on a live staking deposit (vanity suffix 'Stake')
+    "45Le5FPLLom5dEj9aE7sioQsooAdv3ws3Q2JdUmStake": "MINI staking",
+    # seen live; names inferred from vanity prefixes only — '?' marks unverified
+    "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG": "Meteora DAMM v2?",
+    "DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH": "DFlow?",
+    "TessVdML9pBGgG9yGks7o4HewRaXVAMuoVj4x83GLQH": "Tessera?",
 })
+STAKING = {"MINI staking"}
 ORDER_BOOKS = {"Manifest CLOB", "Jupiter Limit Order"}
 AGGREGATORS = {"Jupiter v6"}      # a swap route; never an LP position change
 _programs_seen: dict[str, int] = {}   # unlabeled program ids -> occurrences
@@ -423,9 +430,12 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
                   if m == mint and own != wallet and v}
 
         routed = any(v in AGGREGATORS for v in lp)
+        staking = any(v in STAKING for v in lp)
         if d_tok > 0:
             if quote_out:
                 kind = "buy"
+            elif staking:
+                kind = "unstake"
             elif routed:
                 kind = "protocol_in"      # DCA/limit fill: payment escrowed earlier
             elif lp:
@@ -437,6 +447,8 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
                 kind = "burn"
             elif quote_in:
                 kind = "sell"
+            elif staking:
+                kind = "stake"
             elif routed:
                 kind = "protocol_out"
             elif lp:
@@ -476,9 +488,9 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
             led.received += d_tok
         elif kind == "transfer_out":
             led.sent += -d_tok
-        elif kind == "protocol_in":
+        elif kind in ("protocol_in", "unstake"):
             led.protocol_in += d_tok
-        elif kind == "protocol_out":
+        elif kind in ("protocol_out", "stake"):
             led.protocol_out += -d_tok
         elif kind == "lp_deposit":
             led.lp_deposited += -d_tok
@@ -1010,7 +1022,7 @@ def render_ledger(l: dict) -> list[str]:
                if e["kind"] in ("lp_deposit", "lp_withdraw", "burn",
                                 "transfer_in", "transfer_out",
                                 "protocol_in", "protocol_out",
-                                "lookalike_dust")]
+                                "stake", "unstake", "lookalike_dust")]
     if notable:
         out.append("    notable movements:")
         for e in notable[:12]:
