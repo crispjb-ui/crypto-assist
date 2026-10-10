@@ -79,8 +79,9 @@ def parse_tx(rpc: SolRpc, wallet: str, label: str, sig: dict, tx: dict) -> list[
     venues = [LP_PROGRAMS[p] for p in progs if p in LP_PROGRAMS]
     out = []
     ts = sig.get("blockTime") or 0
-    from .reconcile import STAKING
+    from .reconcile import STAKING, AGGREGATORS
     staking = any(v in STAKING for v in venues)
+    routed = any(v in AGGREGATORS for v in venues)   # Jupiter route = a fill
     for mint, d in mine.items():
         others = {o: v for (o, m), v in deltas.items() if m == mint and o != wallet and v}
         flows = {c: v for c, v in
@@ -90,9 +91,11 @@ def parse_tx(rpc: SolRpc, wallet: str, label: str, sig: dict, tx: dict) -> list[
         q_out = any(v < 0 for v in flows.values())
         q_in = any(v > 0 for v in flows.values())
         if d > 0:
-            kind = "buy" if q_out else ("unstake" if staking else "transfer_in")
+            kind = ("buy" if q_out else "unstake" if staking
+                    else "fill" if routed else "transfer_in")
         else:
-            kind = "sell" if q_in else ("stake" if staking else "transfer_out")
+            kind = ("sell" if q_in else "stake" if staking
+                    else "fill_out" if routed else "transfer_out")
         cp = ""
         if kind in ("transfer_in", "transfer_out") and others:
             want = (lambda v: v < 0) if kind == "transfer_in" else (lambda v: v > 0)
@@ -167,6 +170,10 @@ def describe(e: dict) -> str:
         return f"{e['label']} SENT {amt} → {e['counterparty'][:8]}…"
     if k == "transfer_in":
         return f"{e['label']} received {amt} ← {e['counterparty'][:8]}…"
+    if k == "fill":
+        return f"{e['label']} BOUGHT {amt} (DCA/order fill)" + (f" via {', '.join(e['venues'])}" if e["venues"] else "")
+    if k == "fill_out":
+        return f"{e['label']} SOLD {amt} (DCA/order fill)" + (f" via {', '.join(e['venues'])}" if e["venues"] else "")
     if k == "stake":
         return f"{e['label']} STAKED {amt}"
     if k == "unstake":
