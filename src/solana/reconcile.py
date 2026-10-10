@@ -220,15 +220,31 @@ def _label_currency(mint: str, symbols: dict[str, str]) -> str:
 
 
 def _usd_price(mint: str) -> float | None:
-    """Current DexScreener price for a Solana mint (cached). None = unpriced."""
-    if mint not in _usd_cache:
-        try:
-            pair = dexscreener.best_pair_for_token(mint, DEX_CHAIN)
-            px = float((pair or {}).get("priceUsd") or 0)
-            _usd_cache[mint] = px if px > 0 else None
-        except Exception:
-            _usd_cache[mint] = None
-    return _usd_cache[mint]
+    """Current DexScreener price for a Solana mint (cached). None = unpriced.
+    priceUsd on a pair is the BASE token's price, so the mint must be the
+    base of the pair used; when it is only the quote (USDC, SOL in most
+    pairs) its price is priceUsd / priceNative of that pair."""
+    if mint in _usd_cache:
+        return _usd_cache[mint]
+    px = None
+    try:
+        pairs = [q for q in dexscreener.token_pairs(mint)
+                 if q.get("chainId") == DEX_CHAIN]
+        liq = lambda q: (q.get("liquidity") or {}).get("usd") or 0
+        as_base = [q for q in pairs if (q.get("baseToken") or {}).get("address") == mint]
+        as_quote = [q for q in pairs if (q.get("quoteToken") or {}).get("address") == mint]
+        if as_base:
+            best = max(as_base, key=liq)
+            v = float(best.get("priceUsd") or 0)
+            px = v if v > 0 else None
+        if px is None and as_quote:
+            best = max(as_quote, key=liq)
+            usd, nat = float(best.get("priceUsd") or 0), float(best.get("priceNative") or 0)
+            px = usd / nat if usd > 0 and nat > 0 else None
+    except Exception:
+        px = None
+    _usd_cache[mint] = px
+    return px
 
 
 def usd_now(flows: dict) -> tuple[float | None, list[str]]:
