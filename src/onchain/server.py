@@ -388,6 +388,25 @@ def _run_due_auto_jobs() -> None:
                 print(f"auto-maintenance: {name} started", flush=True)
 
 
+WATCH_INTERVAL_SECONDS = 20   # watched wallets: entries can finish in minutes
+
+
+def watch_loop() -> None:
+    """Independent fast loop for watched wallets — never waits on the feed."""
+    from ..solana import watch as sol_watch
+    while True:
+        try:
+            fresh = sol_watch.poll()
+            if fresh:
+                with state["lock"]:
+                    state["watch"] = sol_watch.recent()
+                for e in fresh:
+                    print("watch:", sol_watch.describe(e), flush=True)
+        except Exception:
+            traceback.print_exc()
+        time.sleep(WATCH_INTERVAL_SECONDS)
+
+
 def scanner_loop() -> None:
     from . import explorer
     last_setups = 0.0
@@ -513,6 +532,17 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as exc:
                 self._json(500, {"error": str(exc)})
+        elif self.path.startswith("/api/watch"):
+            try:
+                from ..solana import watch as sol_watch
+                with state["lock"]:
+                    events = list(state.get("watch") or [])
+                self._json(200, {"wallets": [{"label": l, "wallet": w}
+                                             for l, w in sol_watch.watched()],
+                                 "events": [{**e, "text": sol_watch.describe(e)}
+                                            for e in events]})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
         elif self.path.startswith("/api/stats"):
             try:
                 self._json(200, outcomes.stats_data())
@@ -614,6 +644,7 @@ def main() -> None:
     import os
     port = int(os.environ.get("CRYPTO_ASSIST_PORT", "8537"))
     threading.Thread(target=scanner_loop, daemon=True).start()
+    threading.Thread(target=watch_loop, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"crypto-assist dashboard: http://localhost:{port}")
     print("first feed results appear after the initial scan (~1-3 min); "

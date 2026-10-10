@@ -90,6 +90,7 @@
       <option value="pons">pons</option>
       <option value="long">long</option>
     </select></label>
+  <div class="box" id="watchbox" style="display:none"></div>
   <table id="feed"><tbody></tbody></table>
   <div class="box" id="entrybox"></div>
 </section>
@@ -208,8 +209,36 @@ function maybeAlert(rows) {
   firstFeedLoaded = true;
 }
 
+const watchNotified = new Set();
+let watchBaselined = false;
+async function refreshWatch() {
+  try {
+    const w = await (await fetch("/api/watch")).json();
+    const box = $("#watchbox");
+    if (!w.wallets || !w.wallets.length) { box.style.display = "none"; return; }
+    box.style.display = "block";
+    const ev = w.events || [];
+    box.textContent = "WATCHED WALLETS — " +
+      w.wallets.map(x => `${x.label} ${x.wallet.slice(0,6)}…`).join(", ") +
+      (ev.length ? "\n" + ev.slice(0, 25).map(e =>
+        `${new Date(e.ts*1000).toLocaleTimeString()}  ${e.text}  [${e.mint}]`).join("\n")
+       : "\nno movements seen yet (alerts fire on buys, sells, sweeps)");
+    for (const e of ev) {
+      if (watchNotified.has(e.sig + e.mint)) continue;
+      watchNotified.add(e.sig + e.mint);
+      if (watchBaselined && alertsOn &&
+          ["buy", "sell", "transfer_out"].includes(e.kind)) {
+        const n = new Notification(`WATCH: ${e.text}`, { body: e.mint, tag: e.sig + e.mint });
+        n.onclick = () => window.focus();
+      }
+    }
+    watchBaselined = true;
+  } catch (e) {}
+}
+
 async function refresh() {
   try {
+    refreshWatch();
     const d = await (await fetch("/api/feed")).json();
     maybeAlert(d.rows || []);
     $("#status").textContent = d.scanning ? "scanning…" :
