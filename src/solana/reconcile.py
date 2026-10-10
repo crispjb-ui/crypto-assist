@@ -188,6 +188,9 @@ def _burned_by(tx: dict, wallet: str, mint: str, decimals: int) -> float:
 
 
 _sym_cache: dict[str, str | None] = {}
+_label_to_mint: dict[str, str] = {"SOL": WSOL_MINT, "USDC": USDC_MINT}
+_usd_cache: dict[str, float | None] = {}
+USD = False                     # --usd: mark every flow to CURRENT prices
 # tickers people trust on sight; on any mint but the canonical one the label
 # must say the symbol is self-declared
 _MAJORS = {"BTC", "WBTC", "ETH", "WETH", "SOL", "USDC", "USDT", "JUP"}
@@ -201,15 +204,56 @@ def _label_currency(mint: str, symbols: dict[str, str]) -> str:
     if mint == USDC_MINT:
         return "USDC"
     if mint in symbols:
+        _label_to_mint[symbols[mint]] = mint
         return symbols[mint]
     if mint not in _sym_cache:            # one DexScreener lookup per mint
         _sym_cache[mint] = _dex_symbol(mint)
     sym = _sym_cache[mint]
     if not sym:
-        return mint[:4] + "…" + mint[-4:]
-    if sym.upper() in _MAJORS and _CANONICAL.get(mint) != sym.upper():
-        return f"'{sym}' UNVERIFIED SYMBOL ({mint[:4]}…{mint[-4:]})"
-    return f"{sym} ({mint[:4]}…{mint[-4:]})"
+        label = mint[:4] + "…" + mint[-4:]
+    elif sym.upper() in _MAJORS and _CANONICAL.get(mint) != sym.upper():
+        label = f"'{sym}' UNVERIFIED SYMBOL ({mint[:4]}…{mint[-4:]})"
+    else:
+        label = f"{sym} ({mint[:4]}…{mint[-4:]})"
+    _label_to_mint[label] = mint
+    return label
+
+
+def _usd_price(mint: str) -> float | None:
+    """Current DexScreener price for a Solana mint (cached). None = unpriced."""
+    if mint not in _usd_cache:
+        try:
+            pair = dexscreener.best_pair_for_token(mint, DEX_CHAIN)
+            px = float((pair or {}).get("priceUsd") or 0)
+            _usd_cache[mint] = px if px > 0 else None
+        except Exception:
+            _usd_cache[mint] = None
+    return _usd_cache[mint]
+
+
+def usd_now(flows: dict) -> tuple[float | None, list[str]]:
+    """(usd at CURRENT prices, unpriced labels). None when nothing priced.
+    Display-only: what those units are worth now, not at trade time."""
+    total, any_priced, unpriced = 0.0, False, []
+    for label, units in flows.items():
+        mint = _label_to_mint.get(label)
+        px = _usd_price(mint) if mint else None
+        if px is None:
+            unpriced.append(label)
+        else:
+            total += units * px
+            any_priced = True
+    return (total if any_priced else None), unpriced
+
+
+def _usd_line(name: str, flows: dict) -> str | None:
+    if not USD or not flows:
+        return None
+    v, unp = usd_now(flows)
+    if v is None:
+        return f"    ≈ {name} now: unpriced ({', '.join(unp)})"
+    return (f"    ≈ {name} now: {'-' if v < 0 else ''}${abs(v):,.0f} at current prices"
+            + (f" (excl. {', '.join(unp)})" if unp else ""))
 
 
 # ------------------------------------------------------------- the engine
@@ -755,7 +799,7 @@ def _fmt(v: float) -> str:
 
 
 def _flows(d: dict) -> str:
-    if len(d) > 4:                 # a person pays in one or two currencies
+    if len(d) > 4 and not USD:     # a person pays in one or two currencies
         majors = {c: v for c, v in d.items() if c in ("SOL", "USDC", "USDT")}
         return (" + ".join(f"{_fmt(v)} {c}" for c, v in sorted(majors.items()))
                 + (" + " if majors else "")
@@ -799,6 +843,21 @@ def render_ledger(l: dict) -> list[str]:
         out.append(f"    burned: {_fmt(l['burned'])} {sym}")
     out.append(f"    net cash flow (all events, fees/rent included): "
                f"{_flows(l['net_flow'])}")
+    for name, fl in (("outlay", l["outlay"]), ("receipts", l["receipts"]),
+                     ("net cash flow", l["net_flow"])):
+        line = _usd_line(name, fl)
+        if line:
+            out.append(line)
+    if USD:
+        px = _usd_price(l["mint"])
+        bal = l["balance_now"]
+        if px is not None and bal == bal:
+            out.append(f"    ≈ holdings now: ${bal * px:,.0f} ({_fmt(bal)} {sym} × ${px:.6g})")
+            v, _ = usd_now(l["net_flow"])
+            if v is not None:
+                out.append(f"    ≈ position result now: ${v + bal * px:,.0f} "
+                           "(net cash flow + holdings, current prices, "
+                           "fees included; NOT realized P&L)")
     out.append(f"    holds now: {_fmt(l['balance_now'])} {sym}"
                + ("" if abs(l["unreconciled"]) < 1e-6 else
                   f"   UNRECONCILED: {_fmt(l['unreconciled'])} {sym} ("
@@ -846,12 +905,15 @@ def render_text(d: dict) -> str:
 
 
 def main() -> int:
-    global VERBOSE, MAX_TXS, MAX_SIG_PAGES
+    global VERBOSE, MAX_TXS, MAX_SIG_PAGES, USD
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("address")
     ap.add_argument("--mint", help="when address is a wallet: the token to "
                                    "reconcile — full mint or its ticker (e.g. HOTBOT)")
     ap.add_argument("--wallets", type=int, default=DEFAULT_WALLETS)
+    ap.add_argument("--usd", action="store_true",
+                    help="mark every flow and holding to CURRENT DexScreener "
+                         "prices (display-only; not realized P&L)")
     ap.add_argument("--max-txs", type=int, default=None,
                     help=f"transactions per wallet×mint (default {MAX_TXS}); "
                          "raise for a full-history run")
@@ -863,6 +925,7 @@ def main() -> int:
                          "a trading wallet (who sent, did they buy, do amounts match)")
     a = ap.parse_args()
     VERBOSE = a.debug
+    USD = a.usd
     if a.max_txs:
         MAX_TXS = a.max_txs
         MAX_SIG_PAGES = max(MAX_SIG_PAGES, a.max_txs // 1000 + 1)
