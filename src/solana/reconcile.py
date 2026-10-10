@@ -186,6 +186,11 @@ def _burned_by(tx: dict, wallet: str, mint: str, decimals: int) -> float:
 
 
 _sym_cache: dict[str, str | None] = {}
+# tickers people trust on sight; on any mint but the canonical one the label
+# must say the symbol is self-declared
+_MAJORS = {"BTC", "WBTC", "ETH", "WETH", "SOL", "USDC", "USDT", "JUP"}
+_CANONICAL = {USDC_MINT: "USDC", WSOL_MINT: "SOL",
+              "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": "JUP"}
 
 
 def _label_currency(mint: str, symbols: dict[str, str]) -> str:
@@ -198,7 +203,11 @@ def _label_currency(mint: str, symbols: dict[str, str]) -> str:
     if mint not in _sym_cache:            # one DexScreener lookup per mint
         _sym_cache[mint] = _dex_symbol(mint)
     sym = _sym_cache[mint]
-    return f"{sym} ({mint[:4]}…{mint[-4:]})" if sym else mint[:4] + "…" + mint[-4:]
+    if not sym:
+        return mint[:4] + "…" + mint[-4:]
+    if sym.upper() in _MAJORS and _CANONICAL.get(mint) != sym.upper():
+        return f"'{sym}' UNVERIFIED SYMBOL ({mint[:4]}…{mint[-4:]})"
+    return f"{sym} ({mint[:4]}…{mint[-4:]})"
 
 
 # ------------------------------------------------------------- the engine
@@ -398,12 +407,43 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
             led.first_ts = min(led.first_ts or ts, ts)
             led.last_ts = max(led.last_ts, ts)
     led.net_flow = dict(net)
+    _flag_lookalikes(led)
     try:
         led.balance_now = rpc.token_balance(wallet, mint) / 10 ** dec
     except Exception:
         led.balance_now = float("nan")
     led.unreconciled = led.balance_now - led.expected_balance()
     return led
+
+
+LOOKALIKE_PREFIX = 4
+
+
+def _flag_lookalikes(led: WalletLedger) -> None:
+    """Address poisoning: a dust transfer from an address sharing the leading
+    characters of a REAL counterparty, timed around real transfers, so a
+    copy-paste from history goes to the attacker. Flagged, never silently
+    merged with the genuine counterparty."""
+    real: dict[str, float] = defaultdict(float)
+    for e in led.events:
+        if e.kind in ("transfer_in", "transfer_out") and e.counterparty:
+            real[e.counterparty] += abs(e.tokens)
+    if len(real) < 2:
+        return
+    biggest = max(real.values())
+    for cp, vol in real.items():
+        if vol >= biggest * 1e-6:
+            continue                     # not dust relative to real flows
+        twins = [o for o in real if o != cp and o[:LOOKALIKE_PREFIX] == cp[:LOOKALIKE_PREFIX]
+                 and real[o] > vol * 1000]
+        if twins:
+            led.notes.append(
+                f"ADDRESS POISONING: dust from {cp} mimics real counterparty "
+                f"{twins[0]} (same leading {LOOKALIKE_PREFIX} chars) — never copy "
+                "this address from history")
+            for e in led.events:
+                if e.counterparty == cp:
+                    e.kind = "lookalike_dust"
 
 
 def _symbol_map() -> dict[str, str]:
@@ -690,7 +730,8 @@ def render_ledger(l: dict) -> list[str]:
     notable = [e for e in l["events"]
                if e["kind"] in ("lp_deposit", "lp_withdraw", "burn",
                                 "transfer_in", "transfer_out",
-                                "protocol_in", "protocol_out")]
+                                "protocol_in", "protocol_out",
+                                "lookalike_dust")]
     if notable:
         out.append("    notable movements:")
         for e in notable[:12]:
