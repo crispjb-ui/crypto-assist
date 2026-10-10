@@ -50,6 +50,8 @@ LP_PROGRAMS.update({
     "MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms": "Manifest CLOB",
 })
 ORDER_BOOKS = {"Manifest CLOB", "Jupiter Limit Order"}
+AGGREGATORS = {"Jupiter v6"}      # a swap route; never an LP position change
+_programs_seen: dict[str, int] = {}   # unlabeled program ids -> occurrences
 _cp_type_cache: dict[str, str] = {}
 
 
@@ -406,6 +408,9 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
                     "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"}
             unlabeled = [f"program {q[:8]}…{q[-4:]}" for q in sorted(progs)
                          if q not in skip][:2]
+            for q in progs:
+                if q not in skip and q not in LP_PROGRAMS:
+                    _programs_seen[q] = _programs_seen.get(q, 0) + 1
         else:
             unlabeled = []
         burned = _burned_by(tx, wallet, mint, dec)
@@ -416,9 +421,12 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
         others = {own: v for (own, m), v in deltas.items()
                   if m == mint and own != wallet and v}
 
+        routed = any(v in AGGREGATORS for v in lp)
         if d_tok > 0:
             if quote_out:
                 kind = "buy"
+            elif routed:
+                kind = "protocol_in"      # DCA/limit fill: payment escrowed earlier
             elif lp:
                 kind = "lp_withdraw"
             else:
@@ -428,6 +436,8 @@ def reconcile_wallet(rpc: SolRpc, wallet: str, mint: str, mint_info,
                 kind = "burn"
             elif quote_in:
                 kind = "sell"
+            elif routed:
+                kind = "protocol_out"
             elif lp:
                 kind = "lp_deposit"
             else:
@@ -894,6 +904,7 @@ def render_operator(d: dict) -> str:
     out.append("per wallet:")
     for l in d["ledgers"]:
         out += render_ledger(l) + [""]
+    out += _programs_legend()
     return "\n".join(out)
 
 
@@ -1018,7 +1029,18 @@ def render_text(d: dict) -> str:
         body.append("mints referenced (full addresses for --mint):")
         for m, sym in sorted(legend.items(), key=lambda kv: str(kv[1])):
             body.append(f"  {sym:<12} {m}")
+    body += _programs_legend()
     return "\n".join(body)
+
+
+def _programs_legend() -> list[str]:
+    if not _programs_seen:
+        return []
+    out = ["unlabeled programs seen on protocol/LP movements (full ids — "
+           "paste to Claude or add to SOLANA_VENUES):"]
+    for q, n in sorted(_programs_seen.items(), key=lambda kv: -kv[1])[:15]:
+        out.append(f"  {q}  ({n} tx)")
+    return out
 
 
 def main() -> int:
