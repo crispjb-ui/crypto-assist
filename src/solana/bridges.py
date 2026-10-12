@@ -73,6 +73,33 @@ def evm_words(data_b58: str) -> list[str]:
     return sorted(set(out))
 
 
+# Mint -> symbol for the delta readout; anything else prints as mint[:6].
+_KNOWN_MINTS = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
+                "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "USDT"}
+
+
+def wallet_deltas(tx: dict, wallet: str) -> list[str]:
+    """Token balance changes of `wallet` in this transaction, from meta
+    pre/postTokenBalances — the amount actually burned for a bridge."""
+    meta = tx.get("meta") or {}
+    pre, post = {}, {}
+    for src, bucket in ((meta.get("preTokenBalances") or [], pre),
+                        (meta.get("postTokenBalances") or [], post)):
+        for b in src:
+            if b.get("owner") != wallet:
+                continue
+            ui = b.get("uiTokenAmount") or {}
+            bucket[b["mint"]] = (bucket.get(b["mint"], (0, 0))[0] + int(ui.get("amount") or 0),
+                                 int(ui.get("decimals") or 0))
+    out = []
+    for mint in sorted(set(pre) | set(post)):
+        a0, d = pre.get(mint, (0, post.get(mint, (0, 0))[1]))
+        a1, _ = post.get(mint, (0, d))
+        if a1 != a0:
+            out.append(f"{(a1 - a0) / 10 ** d:+,.{min(d, 6)}f} {_KNOWN_MINTS.get(mint, mint[:6])}")
+    return out
+
+
 def classify_tx(tx: dict) -> tuple[list[str], list[str], list[str]]:
     """(bridge labels, EVM-shaped words, unknown program ids) for one
     jsonParsed transaction, top-level and inner instructions."""
@@ -110,6 +137,7 @@ def scan_wallet(rpc: SolRpc, wallet: str, label: str = "") -> tuple[list[dict], 
                 hits.append({"wallet": wallet, "label": label,
                              "sig": sg["signature"], "ts": sg.get("blockTime") or 0,
                              "bridges": bridges, "evm_candidates": words,
+                             "deltas": wallet_deltas(tx, wallet),
                              "unknown_programs": unknown[:4]})
     return hits, complete, len(sigs)
 
@@ -155,6 +183,8 @@ def main() -> int:
             print(f"  {when}  [{label}]  {h['sig'][:20]}…")
             if h["bridges"]:
                 print(f"      bridge: {', '.join(h['bridges'])}")
+            if h.get("deltas"):
+                print(f"      wallet token change: {', '.join(h['deltas'])}")
             for c in h["evm_candidates"]:
                 if c.lower() in want:
                     links.append((h, c))
@@ -170,7 +200,8 @@ def main() -> int:
             for h, c in links:
                 when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(h["ts"])) if h["ts"] else "?"
                 via = ", ".join(h["bridges"]) or "unlabeled program(s): " + ", ".join(h["unknown_programs"])
-                print(f"  {h['label']} {h['wallet']}\n      -> {c}\n      {when} via {via}\n      sig {h['sig']}")
+                amt = ("  " + ", ".join(h["deltas"])) if h.get("deltas") else ""
+                print(f"  {h['label']} {h['wallet']}\n      -> {c}\n      {when} via {via}{amt}\n      sig {h['sig']}")
         else:
             print("no supplied EVM address appears in these wallets' histories — "
                   "no provable bridge link")
