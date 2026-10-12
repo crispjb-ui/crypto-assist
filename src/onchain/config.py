@@ -9,11 +9,17 @@ import os
 from pathlib import Path
 
 
+PROFILE_NAME = os.environ.get("CRYPTO_ASSIST_ENV", ".env")
+PROFILE_FOUND = False
+
+
 def _load_dotenv() -> None:
+    global PROFILE_FOUND
     root = Path(__file__).resolve().parents[2]
-    env = root / os.environ.get("CRYPTO_ASSIST_ENV", ".env")
+    env = root / PROFILE_NAME
     if not env.is_file():
         return
+    PROFILE_FOUND = True
     for line in env.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:

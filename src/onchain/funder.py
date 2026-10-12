@@ -39,10 +39,19 @@ def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
+    if not config.PROFILE_FOUND:
+        print(f"profile file {config.PROFILE_NAME} not found in the repo root — "
+              f"copy {config.PROFILE_NAME}.example to {config.PROFILE_NAME} and "
+              "fill EXPLORER_API_KEY (BscScan / Etherscan key for BSC)",
+              file=sys.stderr)
+        return 2
     if not config.EXPLORER_API_URL:
-        print("EXPLORER_API_URL is not set for this profile — funding traces "
-              "need the chain's explorer (for BSC: CRYPTO_ASSIST_ENV=.env.bsc "
-              "with a BscScan key)", file=sys.stderr)
+        print(f"EXPLORER_API_URL is not set in {config.PROFILE_NAME} — funding "
+              "traces need the chain's explorer", file=sys.stderr)
+        return 2
+    if not config.EXPLORER_API_KEY:
+        print(f"EXPLORER_API_KEY is empty in {config.PROFILE_NAME} — Etherscan-"
+              "family explorers refuse keyless requests", file=sys.stderr)
         return 2
     print(f"chain profile {config.CHAIN_KEY} — explorer {config.EXPLORER_API_URL}")
     for a in sys.argv[1:]:
