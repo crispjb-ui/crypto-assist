@@ -18,6 +18,12 @@ def _load_dotenv() -> None:
     root = Path(__file__).resolve().parents[2]
     env = root / PROFILE_NAME
     if not env.is_file():
+        if "CRYPTO_ASSIST_ENV" in os.environ:
+            import sys
+            print(f"WARNING: profile {PROFILE_NAME} (from CRYPTO_ASSIST_ENV) not "
+                  f"found in {root} — no .env values loaded. PowerShell keeps "
+                  "the variable for the whole session: Remove-Item "
+                  "Env:CRYPTO_ASSIST_ENV to go back to .env", file=sys.stderr)
         return
     PROFILE_FOUND = True
     for line in env.read_text().splitlines():
