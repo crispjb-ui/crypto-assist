@@ -1018,11 +1018,15 @@ def render_ledger(l: dict) -> list[str]:
                      "truncated history" if not l["history_complete"] else
                      "movements in accounts this owner no longer holds")
                   + ")"))
+    # Sells are always notable (a holder's first sale is the exit signal);
+    # buys only when there are few, so a clipping bot's hundreds stay summarized.
+    n_buys = sum(1 for e in l["events"] if e["kind"] == "buy")
     notable = [e for e in l["events"]
                if e["kind"] in ("lp_deposit", "lp_withdraw", "burn",
                                 "transfer_in", "transfer_out",
                                 "protocol_in", "protocol_out",
-                                "stake", "unstake", "lookalike_dust")]
+                                "stake", "unstake", "lookalike_dust", "sell")
+               or (e["kind"] == "buy" and n_buys <= 5)]
     if notable:
         out.append("    notable movements:")
         for e in notable[:12]:
